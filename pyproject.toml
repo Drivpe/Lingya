@@ -1,0 +1,17 @@
+[project]
+name = "ly-cli"
+version = "0.1.0"
+description = "Lingya — 个人跨 harness 金蝶 ERP 开发 CLI(苍穹/星空 OpenAPI)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ly = "ly.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
