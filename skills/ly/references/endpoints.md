@@ -17,6 +17,8 @@ GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <
 - 规则动作载荷:PascalCase(`ActionType`/`Fields`),且 `Fields` 必须是 `[{"_Type_":"FieldId","Id":"<字段key>"}]` 对象数组,传字符串报 ClassCastException。
 - 操作校验(ConditionValidation)的表达式方言**不支持** `isNull()/isEmpty()`,空判写 `(x = null OR x = '')`;字段有 DefValue 时不可加"为空校验"(运行时永不为空)。
 - **GrpfieldsuniqueValidation 完整参数**(2026-09-07 实测+反编译+DB 验证):`Fields` 引用**基础资料字段必须用 `<key>.id`**(如 `materialid.id`=主物料.内码),裸 key 会致设计器报「找不到字段:%s,请删除。」——字段树把基础资料字段展开为子节点,叶子 id 是 `key.id`(标准表单的 `createorg.id` 同格式);普通字段直接用 key。**⚠️ `IsCheckAllEntity` 是反义命名:字节码实证 `isIgnoreDB() = isCheckAllEntity`——设 true = 忽略数据库、只查本次操作批次的内存数据(单张提交必放行);跨记录唯一必须设 `false`**(标准表单全是 false)。设计器选择器排除类型仅:MulBasedataField/DateRangeField/TimeRangeField/FlexField/MulComboField/BasedataPropField。`Checkadata`=暂存参与。**运行时排障利器**:元数据库 `t_meta_entity`(fnumber=实体,fkey=操作key,含 camelCase fdata)+ 数据表直查,是 API 之外的 ground truth;校验器引用解析失败会抛「配置错误,字段X已不存在」可用于探针。
+- **updateOperation 是「属性平铺+整体替换」契约**(2026-09-07 实测,踩坑):body 形如 `{"formNumber":...,"operationKey":...,"validations":[...]}`,**不能**传 `{"operation":{...}}` 包装(报「至少需要指定一个要修改的属性」);且 `validations` 为**整体替换语义——改单条校验必须带全量数组**,只传一条会把其余校验全部冲掉(实测:9 条被冲剩 1 条,再发全量 9 条恢复)。改完必以 getOperation 读回清点条数。
+- **GrpFieldsUniqueValidator 不支持条件过滤**(2026-09-07 字节码实证):配置键仅 `fields/isCheckAllEntity/isCheckEmptyValue/isCheckMultilang/checkadata/customPromp/skipbillnovalidator`,DB 查重仅按「组字段相等+排除自身 id」构造过滤器——**无法表达「仅查启用记录」**。状态感知唯一的零代码解法:把状态字段加进 `Fields` 组成组合唯一(如 `[materialid.id, enable]`,BillStatusField 不在设计器排除类型中,可直接用裸 key),语义=同物料同使用状态仅一张;禁用/启走独立操作不经 Submit,故「禁用旧 BOM→新建」可正常通过。
 
 ## 基础查询
 | 端点 | 路径 |
