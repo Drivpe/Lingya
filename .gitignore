@@ -6,6 +6,7 @@ kingdee-knowledge-kit/
 
 # 工作区本地配置
 .zcode/
+.workbuddy/
 
 # Python
 __pycache__/
