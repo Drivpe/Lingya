@@ -69,6 +69,20 @@
 - **遗留**:issue #9 在 GitHub 上待关(结案评论内容即本文档 §3/§5)。
 - **红线回顾**:全程未把任何凭证写入文档/聊天/仓库;写操作走 confirm 门。
 
+## 8. 迭代 v2:状态感知唯一(禁用不参与查重)
+
+**新需求**:被禁用的 BOM 不应挡住同物料新建 BOM。
+
+**侦察结论**:
+- 反编译 `GrpFieldsUniqueValidator`(bos-mservice-operation-8.0.jar)证实其配置键仅 `fields/isCheckAllEntity/isCheckEmptyValue/isCheckMultilang/checkadata/customPromp/skipbillnovalidator`,DB 查重仅按「组字段相等+排除自身 id」构造过滤器——**不支持条件过滤**,无法直接表达「仅查启用记录」;
+- 平台校验器清单(同包 29 类)无可零代码挂载的脚本校验;BOM 实体存在 `enable`(使用状态,BillStatusField)字段,不在设计器选择器排除类型中。
+
+**方案**(纯元数据):组合唯一 `Fields=[materialid.id, enable]`——同物料同使用状态仅一张。新建 BOM 默认启用,故:同物料已有启用 BOM → 拦;旧 BOM 走禁用操作(不经 Submit,不受校验管辖)→ 禁用后同物料可重建。提示语同步更新为「同一物料仅允许存在一张启用BOM(ly二开校验)」。已知偏差:刻意新建「禁用态」新单时,同物料第二张会被拦(罕见路径)。
+
+**实施中的新陷阱(重大)**:`updateOperation` 是**属性平铺契约**——body 传 `{"operation":{...}}` 包装报「至少需要指定一个要修改的属性」,须平铺 `{"formNumber","operationKey","validations":[...]}`;且 `validations` 为**整体替换语义**,改单条必须带全量数组——实测只传 1 条把 8 条标准校验全部冲掉,靠 getOperation 读回清点发现,再发全量 9 条恢复。两条实证均已沉淀 `skills/ly/references/endpoints.md`。
+
+**待验收**:三场景运行时测试(①同物料+已有启用 BOM→拦,兼证 `isCheckAllEntity` 未被写坏;②靶物料启用 BOM 全禁用后新建同物料→过;③全新物料→过)。
+
 ## 来源索引
 
 - 参数权威:`skills/ly/references/endpoints.md:19`(提交 e6f9ab0/e7e1311/d22c863)
