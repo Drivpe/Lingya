@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.request
 
-from . import __version__, api, auth, config
+from . import __version__, api, auth, config, settings
 from .envelope import fail, ok
 
 # devportal ai-meta 端点表(来源: 灵基 app-build 技能 cosmic-meta-api 端点目录)
@@ -102,17 +103,61 @@ def cmd_meta(args) -> None:
     _unwrap(body)
 
 
+# ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
+
+def write_gate(args, env: dict, payload) -> None:
+    """write-mode=confirm 时,非 GET 请求默认 dry-run;--confirm 放行。
+
+    free 模式直接放行;--dry-run 在任何模式下都只看预览。
+    """
+    preview = {
+        "mode": "dry-run(未执行)",
+        "write_mode": settings.get_write_mode(),
+        "env": env["name"],
+        "method": args.method.upper(),
+        "path": args.path,
+        "body": payload,
+        "params": getattr(args, "params", None),
+    }
+    if getattr(args, "dry_run", False):
+        ok(preview)
+    if settings.get_write_mode() == "confirm" and not getattr(args, "confirm", False):
+        ok(preview, meta={"hint": "write-mode=confirm:确认无误后加 --confirm 执行;或 ly config set write-mode free 永久放开"})
+
+
 # ── api 透传 ──────────────────────────────────────────────────────────────────
 
 def cmd_api(args) -> None:
     env = _resolve_env(args)
-    if not args.path.startswith("/"):
-        fail("args", "bad_path", "path 必须以 / 开头,如 /kapi/v2/devportal/ai-meta/queryForms")
+    # Git Bash/MSYS 会把 /kapi/... 改写成 Windows 路径(如 C:/Program Files/Git/kapi/...);尽力还原
+    path = args.path.replace("\\", "/")
+    if len(path) > 2 and path[1] == ":":
+        m = re.search(r"/Git/(.+)$", path)
+        path = "/" + m.group(1).lstrip("/") if m else "/" + path.split(":/", 1)[-1].lstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    args.path = path
     payload = json.loads(args.data) if args.data else None
+    if args.method.upper() != "GET":
+        write_gate(args, env, payload)
     params = json.loads(args.params) if args.params else None
     body = api.call(env, args.method.upper(), args.path,
                     payload=payload, params=params, style=args.style)
     _unwrap(body)
+
+
+# ── config(ly 自有设置) ─────────────────────────────────────────────────────
+
+def cmd_config(args) -> None:
+    if args.config_cmd == "show":
+        ok({"write_mode": settings.get_write_mode(),
+            "settings_file": str(settings.settings_path())})
+    elif args.config_cmd == "set":
+        try:
+            settings.set_write_mode(args.value)
+        except ValueError as e:
+            fail("args", "bad_value", str(e))
+        ok({"write_mode": settings.get_write_mode()})
 
 
 # ── doctor ────────────────────────────────────────────────────────────────────
@@ -186,8 +231,19 @@ def build_parser() -> argparse.ArgumentParser:
     api_p.add_argument("--data", help="请求体 JSON")
     api_p.add_argument("--params", help="查询参数 JSON")
     api_p.add_argument("--style", choices=["kapi", "legacy"], default="kapi")
+    api_p.add_argument("--confirm", action="store_true",
+                       help="write-mode=confirm 时,真执行非 GET 请求必须携带")
+    api_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
     common(api_p)
     api_p.set_defaults(func=cmd_api)
+
+    cfg_p = sub.add_parser("config", help="ly 自有设置(~/.ly/config.json)")
+    cfg_sub = cfg_p.add_subparsers(dest="config_cmd", required=True)
+    cfg_sub.add_parser("show", help="查看当前设置")
+    set_p = cfg_sub.add_parser("set", help="设置项,如:ly config set write-mode free")
+    set_p.add_argument("key", choices=["write-mode"])
+    set_p.add_argument("value", choices=["confirm", "free"])
+    cfg_p.set_defaults(func=cmd_config)
 
     doc_p = sub.add_parser("doctor", help="环境体检:配置→连通→认证")
     common(doc_p)

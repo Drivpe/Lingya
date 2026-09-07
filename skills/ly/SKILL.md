@@ -13,6 +13,8 @@ description: 个人金蝶 ERP 开发 CLI(苍穹/星空 OpenAPI)。查询金蝶�
 2. ly 的所有输出是 **JSON 信封**:成功 = stdout `{"ok":true,"data":...}` 且退出码 0;失败 = stderr `{"ok":false,"error":{type,code,message,hint}}`。**先判 `ok` 或退出码,再取 data**。
 3. 凭证在 `~/.kd/config.json`(与灵基环境管理同源),**永远不要把 client_secret 打进对话或写入任何仓库文件**。
 4. 认证有限流(30次/分)和**密钥错误锁定**——getToken 报 401 时,提示用户核对密钥,禁止连续重试。
+5. **写操作门**:`ly` 的 write-mode 默认 `confirm`——一切非 GET 请求(含 `ly api POST/PUT/DELETE`)默认只返回请求预览不执行;正确姿势:先跑一次拿预览 → 给用户看 → 用户点头后加 `--confirm` 重跑。用户明确说过"放开"时才可 `ly config set write-mode free` 永久关闭门(之后无需 --confirm)。任何时候都可加 `--dry-run` 只看预览。
+6. Git Bash/MSYS 宿主:URL path 参数会被改写成 Windows 路径,ly 会自动还原;若异常,命令前加 `MSYS_NO_PATHCONV=1`。
 
 ## 常用命令
 
@@ -30,6 +32,7 @@ ly meta form-schema --params '{"formNumber":"..."}' # 表单 schema
 ly meta entity-fields --params '{"formNumber":"..."}' # 实体字段
 
 ly api GET /kapi/v2/devportal/ai-meta/queryForms --params '{"keyword":"X"}'   # 任意端点兜底
+ly config set write-mode free                       # 关闭写操作门(用户明确要求后才做)
 ```
 
 环境选择:`-e <环境名>`;缺省取 `isDefault`。

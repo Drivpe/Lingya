@@ -35,18 +35,23 @@ ly api GET /kapi/v2/devportal/ai-meta/getDevInfo
 - 成功:stdout `{"ok":true,"data":...,"meta":{...}}`,退出码 0
 - 失败:stderr `{"ok":false,"error":{"type","code","message","hint"}}`,退出码 1
 
+## 写操作门
+
+`ly` 的 write-mode 出厂默认 `confirm`:一切非 GET 请求(含 `ly api` 透传)默认只返回请求预览,加 `--confirm` 才真正执行;`ly config set write-mode free` 一键永久放开(agent 自由写入);`--dry-run` 任何模式下都只看预览。不记审计日志(决议见 issue #3)。
+
+## 路线图
+
+- [x] v0.1 auth(getToken/verify/withdraw)+ meta 只读查询 + api 透传 + doctor
+- [x] v0.1.1 写操作门(write-mode confirm/free)+ ly config 命令
+- [ ] v0.2 数据查询/写操作(业务 API 为「对象×操作」发布式路由,需表单→操作API映射;见 issue #2 调研)
+- [ ] v0.3 与灵基 app-build 技能协同的元数据二开(buildMeta/modifyMeta/插件)
+- [ ] v0.4 星空适配(K3 Cloud 是分支逻辑:LoginBySign 签名会话;旗舰版则近零适配;见 issue #7 调研)
+
 ## 宿主接入
 
 - **灵基 build**:把 `skills/ly/` 复制到 `C:\Users\<user>\.lingeebuild\config\builtin-skills\ly`
 - **ZCode / Claude Code**:把 `skills/ly/` 放入对应 skills 目录
 - **opencode**:无 skills 机制时,在指令中让它读 `skills/ly/SKILL.md` 文件即可
-
-## 路线图
-
-- [x] v0.1 auth(getToken/verify/withdraw)+ meta 只读查询 + api 透传 + doctor
-- [ ] v0.2 数据查询(单据/报表)、写操作(保存/提交/审核,需授权评估)
-- [ ] v0.3 与灵基 app-build 技能协同的元数据二开(buildMeta/modifyMeta/插件)
-- [ ] v0.4 星空公有云适配
 
 ## 安全红线
 
