@@ -16,7 +16,7 @@ GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <
 - `Visible` 是按单据状态的可见性串(`init,new,edit,view,submit,audit`),不是布尔;状态级裁剪即"业务可见性"。
 - 规则动作载荷:PascalCase(`ActionType`/`Fields`),且 `Fields` 必须是 `[{"_Type_":"FieldId","Id":"<字段key>"}]` 对象数组,传字符串报 ClassCastException。
 - 操作校验(ConditionValidation)的表达式方言**不支持** `isNull()/isEmpty()`,空判写 `(x = null OR x = '')`;字段有 DefValue 时不可加"为空校验"(运行时永不为空)。
-- **GrpfieldsuniqueValidation 完整参数**(2026-09-07 实测+反编译):`Fields` 引用**基础资料字段必须用 `<key>.id`**(如 `materialid.id`=主物料.内码),裸 key 会致设计器报「找不到字段:%s,请删除。」——字段树把基础资料字段展开为子节点,叶子 id 是 `key.id`(标准表单的 `createorg.id` 同格式);普通字段直接用 key。`IsCheckAllEntity` 默认 false=只查单据内数据,跨记录唯一必须显式 true;`Checkadata`=暂存参与。设计器选择器排除类型仅:MulBasedataField/DateRangeField/TimeRangeField/FlexField/MulComboField/BasedataPropField。验证门槛=元数据读回+设计器选择器双确认。
+- **GrpfieldsuniqueValidation 完整参数**(2026-09-07 实测+反编译+DB 验证):`Fields` 引用**基础资料字段必须用 `<key>.id`**(如 `materialid.id`=主物料.内码),裸 key 会致设计器报「找不到字段:%s,请删除。」——字段树把基础资料字段展开为子节点,叶子 id 是 `key.id`(标准表单的 `createorg.id` 同格式);普通字段直接用 key。**⚠️ `IsCheckAllEntity` 是反义命名:字节码实证 `isIgnoreDB() = isCheckAllEntity`——设 true = 忽略数据库、只查本次操作批次的内存数据(单张提交必放行);跨记录唯一必须设 `false`**(标准表单全是 false)。设计器选择器排除类型仅:MulBasedataField/DateRangeField/TimeRangeField/FlexField/MulComboField/BasedataPropField。`Checkadata`=暂存参与。**运行时排障利器**:元数据库 `t_meta_entity`(fnumber=实体,fkey=操作key,含 camelCase fdata)+ 数据表直查,是 API 之外的 ground truth;校验器引用解析失败会抛「配置错误,字段X已不存在」可用于探针。
 
 ## 基础查询
 | 端点 | 路径 |
