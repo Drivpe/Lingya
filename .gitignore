@@ -1,0 +1,19 @@
+# 敏感信息红线:交接文档体系含明文 key/cookie 线索,永不入仓
+灵基模型切换-交接文档*.md
+
+# 独立仓库,自行管理生命周期
+kingdee-knowledge-kit/
+
+# 工作区本地配置
+.zcode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+
+# 本地临时
+*.log
+/tmp/
