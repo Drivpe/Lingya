@@ -276,3 +276,38 @@ C2 尝试复用 B 线「发布 query 操作 API」读 `botp_convertrule` 行数�
 4. 问答《拿到了源单分录id,如何调用BOTP的转换规则…》 https://vip.kingdee.com/question/293515438938584576 —— selectedRows 分录下推写法背景
 5. 《OpenAPI整体介绍》knowledge, https://vip.kingdee.com/knowledge/226032339657008640 —— OpenAPI 注册/网关机制背景(404 文案出处)
 6. 《集成方案API》knowledge, https://vip.kingdee.com/knowledge/49142 及《数据集成方案转API介绍》 https://vip.kingdee.com/knowledge/49160 —— PULL/TRANSFER/PUSH/EXECUTE 集成方案 API(`/kapi/app/iscb/{api_number}`)
+
+## 8. 设计器抓包结果(2026-09-08,C1 收口):通用表单服务通道完全打通
+
+抓包方式:browser-use 控制浏览器(登录态:用户会话),XHR/fetch 探针注入 + 页面内 fetch 重放实验。
+入口链:工作台 → 开发者门户(`?formId=pc_devportal_main`,由首页 `window.open('?formId=pc_devportal_main')` 打开)→ 应用管理 → 开发服务云(DEV)→ 单据转换管理(xkbotp,appId `36J2ZGF9FVZ5`)→ 单据转换菜单 → 转换路线列表。
+
+### 8.1 通用表单服务契约(苍穹全部设计器页面的底层通道)
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/ierp/form/getConfig.do?params={"formId":"<formNumber>","flag":"<随机16位>","f":"<随机16位>"}` | GET | **建立表单页面会话,响应 JSON 内含服务端分配的 `pageId`("root"+hex32)**;另返回 publicKey/watermark/tenantId 等 |
+| `/ierp/form/getMetadata.do?fid=<formNumber>&version=<版本串>` | GET | 表单布局元数据(前端渲染用;CLI 侧可跳过) |
+| `/ierp/form/batchInvokeAction.do?appId=bos&f=<formNumber>&ac=<action>` | POST | **通用动作通道**。body: `pageId=<pageId>&appId=bos&params=[{"key":"<控件key>","methodName":"<方法>","args":[...],"postData":[...]}]` |
+| `/ierp/form/invokeAction.do?appId=bos&f=<form>&ac=queryTreeNodeChildren` | POST | 树控件子节点查询(同 body 形态) |
+
+- 关键动作(实测):`loadData`(页面数据加载)、`modify`(itemClick btnmodify)、`clientCallBack`、`queryTreeNodeChildren`;响应是动作指令流 `[{"p":[...],"a":"setVisible|setEnable|showForm|setPageConfig|updateData..."}]`。
+- **pageId 是会话钥匙**:必须用 getConfig 下发的 pageId 调 batchInvokeAction;自造 pageId 返回 `showConfirm("当前表单会话超时")`。
+- `modify` 响应含 `showForm` 指令 → 新 `pageId` + `formId`,用新 pageId 对新表单继续 loadData——**表单链就是 pageId 链**。
+- 认证:浏览器会话 Cookie(非 OpenAPI token)。会话登录三步:`auth/queryParameters.do` → `auth/getPublicKey.do`(RSA 公钥)→ `auth/yzjlogin.do`(useraccount + RSA 加密 password + accessKey);错误返回 `{"errorcode":"login.loginBizException"}`。
+
+### 8.2 C2 通道实证(纯 HTTP,无 UI 依赖)
+
+1. **转换路线全量列表**:`getConfig(f=botp_convertpath)` → `batchInvokeAction(ac=loadData, params=[{"key":"","methodName":"loadData","args":[],"postData":[]}])`
+   → **1426 条路线**(3 页 × 500),行结构含 `fsourceentitynumber/fsourceentityname/ftargetentitynumber/ftargetentityname`(dataindex 给出列位)。已确认存在标准→标准路线:`pur_order→pur_instock`、`pur_order→pur_saloutstock`、`pur_order→pur_deliveryschedule` 等(C4 现选候选)。
+2. **规则详情(get)**:同会话 `ac=modify`(itemClick btnmodify,无选中默认第一行)→ showForm 取新 pageId → `botp_convertrule ac=loadData`
+   → **545KB 详情**(含规则树、规则 id、字段映射/分单/合并等全部策略值)。实测拿到规则 **id `652709438813126656`(员工酒店下推还款单,原始,已启用)**——与 §8.3 的 ruleId 形态互证。
+3. **无选中 modify 默认开第一行**;指定行的选中态传递格式待 C3 实现时用受控实验确定。
+
+### 8.3 对 C 线各工单的结论
+
+- **C2(#13)可落地**:`ly convert-rule list` = 路线列表通道;`ly convert-rule get` = modify 链 + 详情解析。前提:ly 需增加**会话登录通道**(yzjlogin 账密 + RSA + Cookie),这是 SKILL.md 与 `ly auth` 的扩展点。
+- **C3(#15)**:保存动作的精确载荷未捕获(两次尝试分别打开了反写规则页/详情页,保存按钮未现身)。保存应为 `batchInvokeAction ac=save/submit` 族,载荷=表单字段值;留待 C3 实现时以"无害保存未修改规则"实验确定。
+- **C4(#18)无需 UI 抓包**:下推走 B 线已验证的操作 API 通道(§4.1/§4.2:`push`/`pushandsave` + `parameter{targetBill, ruleId}`),配合本节 8.2-1 拿到的标准路线规则 id 即可。
+- queryFormsByApp 返回空之谜:与抓包无冲突(设计器按应用列表单走 batchInvokeAction 通道,不走该 OpenAPI),维持"该 OpenAPI 只覆盖设计态发布应用"判断。
+
