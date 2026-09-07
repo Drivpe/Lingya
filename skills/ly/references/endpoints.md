@@ -5,6 +5,11 @@ GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <
 
 ## ⚠️ 实测边界与坑(2026-09-07 本地苍穹验证)
 
+- **扩展标准表单的权限链**(实测 pdm_mftbom/BOM维护):
+  1. `form/action/extendPreCheck` 只读可用:`formExtendable=true` 表示平台允许扩展
+  2. 扩展必须落在「扩展应用」里;`app/extend` 创建扩展应用报 **NO_PERMISSION「当前开发商没有该资源权限」**(治理模式 dev_governance_mode=centred 时,开发商资源权限需管理员在开发者中心配置)
+  3. 直接对标准表单做任何写操作(modifyMeta/updateOperation 等)报 **「表单不属于当前开发商，请扩展后再进行编辑」**
+  → 卡点唯一:管理员侧放开门户商资源权限,或在开发平台 UI 手工创建扩展应用;之后 extendForm→改操作/规则 全 API 可续
 - **禁止 setProperties 写 `Lock`(布尔)**:Lock 是布局层结构化属性,布尔写入会毒化该字段的 FieldAp——此后**该表单所有**元数据保存(含开发平台手工保存)在编译运行时元数据时 NPE(`ControlAp.getLockValue`),报"元数据保存失败: null"。设计文档仍会落库,但运行时元数据停更。**解毒**:`ly meta modify-meta` remove 该字段再 add 回来(重建布局控件),即恢复健康。
 - **"元数据保存失败: null" 的语义**:设计层已保存、运行时层编译失败。一切以独立读回为准;批量写失败要拿 `getProperties` 读回逐项核对(部分属性可能已生效)。
 - 字段读回属性名是 camelCase(mustInput/defValue);写入的 propertyNames 大小写不敏感。
