@@ -2,7 +2,7 @@
 
 命令三层:
   ly auth      add/show/login/test/logout
-  ly meta      devportal ai-meta 只读查询(getDevInfo/bizApps/queryForms/...)
+  ly meta      devportal ai-meta 查询 + 元数据写(build-meta/modify-meta)
   ly api       任意端点透传兜底(lark-cli 模式)
 所有输出走 JSON 信封(envelope)。
 """
@@ -32,6 +32,12 @@ META_ENDPOINTS = {
     "entity-fields":    ("/kapi/v2/devportal/ai-meta/getEntityFields", "GET"),
 }
 
+# 元数据写端点(设计器建模通道),走写操作门
+META_WRITES = {
+    "build-meta":  "/kapi/v2/devportal/ai-meta/buildMeta",
+    "modify-meta": "/kapi/v2/devportal/ai-meta/modifyMeta",
+}
+
 
 def _resolve_env(args) -> dict:
     try:
@@ -40,13 +46,13 @@ def _resolve_env(args) -> dict:
         fail("config", "no_env", str(e), "用 `ly auth add` 添加环境,或 `ly auth show` 查看已有环境")
 
 
-def _unwrap(body):
+def _unwrap(body, took_ms: int | None = None):
     """苍穹响应统一形状 {data,errorCode,message,status} → 信封。"""
     if not isinstance(body, dict):
-        ok(body)
+        ok(body, meta={"took_ms": took_ms} if took_ms is not None else None)
     if str(body.get("errorCode", "0")) != "0" or body.get("status") is False:
         fail("api", body.get("errorCode"), body.get("message", "业务失败"))
-    ok(body.get("data", body))
+    ok(body.get("data", body), meta={"took_ms": took_ms} if took_ms is not None else None)
 
 
 # ── auth ──────────────────────────────────────────────────────────────────────
@@ -93,19 +99,29 @@ def cmd_auth(args) -> None:
 # ── meta ──────────────────────────────────────────────────────────────────────
 
 def cmd_meta(args) -> None:
-    if args.meta_cmd not in META_ENDPOINTS:
-        fail("args", "unknown_endpoint", f"未知端点 {args.meta_cmd}(可选: {', '.join(META_ENDPOINTS)})")
-    path, method = META_ENDPOINTS[args.meta_cmd]
     env = _resolve_env(args)
-    params = json.loads(args.params) if args.params else None
+    params = json.loads(args.params) if getattr(args, "params", None) else None
+    if args.meta_cmd in META_WRITES:
+        payload = json.loads(args.data) if args.data else None
+        path = META_WRITES[args.meta_cmd]
+        write_gate(env, "POST", path, payload, confirm=args.confirm, dry_run=args.dry_run)
+        t0 = time.time()
+        body = api.call(env, "POST", path, payload=payload)
+        _unwrap(body, took_ms=int((time.time() - t0) * 1000))
+        return
+    if args.meta_cmd not in META_ENDPOINTS:
+        fail("args", "unknown_endpoint",
+             f"未知端点 {args.meta_cmd}(可选: {', '.join([*META_ENDPOINTS, *META_WRITES])})")
+    path, method = META_ENDPOINTS[args.meta_cmd]
     t0 = time.time()
     body = api.call(env, method, path, payload=None, params=params)
-    _unwrap(body)
+    _unwrap(body, took_ms=int((time.time() - t0) * 1000))
 
 
 # ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
 
-def write_gate(args, env: dict, payload) -> None:
+def write_gate(env: dict, method: str, path: str, payload, params=None,
+               confirm: bool = False, dry_run: bool = False) -> None:
     """write-mode=confirm 时,非 GET 请求默认 dry-run;--confirm 放行。
 
     free 模式直接放行;--dry-run 在任何模式下都只看预览。
@@ -114,14 +130,14 @@ def write_gate(args, env: dict, payload) -> None:
         "mode": "dry-run(未执行)",
         "write_mode": settings.get_write_mode(),
         "env": env["name"],
-        "method": args.method.upper(),
-        "path": args.path,
+        "method": method.upper(),
+        "path": path,
         "body": payload,
-        "params": getattr(args, "params", None),
+        "params": params,
     }
-    if getattr(args, "dry_run", False):
+    if dry_run:
         ok(preview)
-    if settings.get_write_mode() == "confirm" and not getattr(args, "confirm", False):
+    if settings.get_write_mode() == "confirm" and not confirm:
         ok(preview, meta={"hint": "write-mode=confirm:确认无误后加 --confirm 执行;或 ly config set write-mode free 永久放开"})
 
 
@@ -129,6 +145,7 @@ def write_gate(args, env: dict, payload) -> None:
 
 def cmd_api(args) -> None:
     env = _resolve_env(args)
+    t0 = time.time()
     # Git Bash/MSYS 会把 /kapi/... 改写成 Windows 路径(如 C:/Program Files/Git/kapi/...);尽力还原
     path = args.path.replace("\\", "/")
     if len(path) > 2 and path[1] == ":":
@@ -139,11 +156,13 @@ def cmd_api(args) -> None:
     args.path = path
     payload = json.loads(args.data) if args.data else None
     if args.method.upper() != "GET":
-        write_gate(args, env, payload)
+        write_gate(env, args.method.upper(), args.path, payload,
+                   params=json.loads(args.params) if args.params else None,
+                   confirm=args.confirm, dry_run=args.dry_run)
     params = json.loads(args.params) if args.params else None
     body = api.call(env, args.method.upper(), args.path,
                     payload=payload, params=params, style=args.style)
-    _unwrap(body)
+    _unwrap(body, took_ms=int((time.time() - t0) * 1000))
 
 
 # ── config(ly 自有设置) ─────────────────────────────────────────────────────
@@ -217,11 +236,18 @@ def build_parser() -> argparse.ArgumentParser:
         common(sp)
     auth_p.set_defaults(func=cmd_auth)
 
-    meta_p = sub.add_parser("meta", help="devportal 元数据只读查询")
+    meta_p = sub.add_parser("meta", help="devportal 元数据查询与写")
     meta_sub = meta_p.add_subparsers(dest="meta_cmd", required=True)
-    for name in META_ENDPOINTS:
+    for name, (path, method) in META_ENDPOINTS.items():
         sp = meta_sub.add_parser(name)
         sp.add_argument("--params", help='查询参数 JSON,如 \'{"keyword":"BAS"}\'')
+        common(sp)
+    for name in META_WRITES:
+        sp = meta_sub.add_parser(name, help=f"元数据写: {META_WRITES[name]}(走写操作门)")
+        sp.add_argument("--data", help='请求体 JSON,如 buildMeta 的需求产物 / modifyMeta 的 MetaOps')
+        sp.add_argument("--confirm", action="store_true",
+                        help="write-mode=confirm 时,真执行必须携带")
+        sp.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
         common(sp)
     meta_p.set_defaults(func=cmd_meta)
 

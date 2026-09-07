@@ -1,6 +1,7 @@
 # devportal ai-meta 端点全表(来源:灵基 app-build 技能 cosmic-meta-api)
 
 GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <path>`。
+**已包装的写端点**:`ly meta build-meta --data '<JSON>'`(buildMeta,新建表单)、`ly meta modify-meta --data '<JSON>'`(modifyMeta,MetaOps 增删改)——走写操作门;请求体形状见灵基 app-build `cosmic-meta-api/apis/ai_meta.md`。
 
 ## 基础查询
 | 端点 | 路径 |
