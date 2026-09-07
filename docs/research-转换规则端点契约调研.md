@@ -220,8 +220,38 @@ var result = invokeMicroService("bos", "bos", "ConvertService", "pushAndSave", F
 
 ---
 
-## 6. 来源清单
+## 6. 补充实验(2026-09-07 深夜,C2 自动推进中):B 线通道读规则行的根因定位
 
+C2 尝试复用 B 线「发布 query 操作 API」读 `botp_convertrule` 行数据,发现开放平台 query 运行时
+对该实体一律 `java.lang.NullPointerException`(无论契约是全量、瘦列表还是最小三行;无论 id 必填/可选/带值)。
+对照实验钉死根因:
+
+| 实验 | 实体 | 模型类型 | DBRouteKey | 结果 |
+|---|---|---|---|---|
+| 对照 | `ly_test_bill_a1`(B 线已验) | BillEntityType | secd | query 正常 |
+| 对照 | `bos_billtype`(标准资料,临时发布 `bos_billtype_query`,apiId `2563540873597943808`) | BasedataEntityType | basedata | query 正常(id=1 → 空行,不 NPE) |
+| 目标 | `botp_convertrule` | **DynamicFormModel** | **sys.meta** | query 一律 NPE |
+
+**结论:转换规则表单是 DynamicFormModel(纯 UI 壳,无物理表绑定)**——设计器列表页的数据是
+`ConvertRuleListPlugin` 自己直查 `T_BOTP_ConvertRule`(§3.2),不是走表单模型;开放平台 query
+运行时按表单模型找物理表映射,找不到即 NPE。**这断绝了"发布 query API 读规则行"的产品级通道**
+(与契约写法无关)。
+
+顺带修复(进入 main):
+1. `data.py::_append_field` 空显示名回退参数名——此前 `botp_convertrule` 发布报
+   `respentryentity 第 54 行缺少必填字段 'respdes'`(系统字段无 DisplayName 导致);
+2. `ly data publish --query-id-optional`:query 契约 id 改可选(upsert 同 urlformat),
+   对有物理表的实体兼得分页列全量能力;
+3. `ly convert-rule` 子命令族(`publish-list`/`list`/`get`,src/ly/convert.py)已落地:
+   publish-list 可用;list/get 在本通道被上述根因阻塞,代码保留,待新通道接上即可用。
+
+#13(C2)的可行方向(需决策,见 issue 讨论):
+- **A. 设计器抓包**复刻列表页请求(§5 清单;需用户配合,顺带把 ruleId 行数据通道一次拿全);
+- **B. 服务端自定义操作插件**(Java,部署到本机 `C:\cosmic` 的 cus/):spec 已把「Java BOTP 插件路线」
+  列为 out-of-scope,走此路需先改 spec;
+- **C. 集成方案 PULL API**(`/kapi/app/iscb/{api_number}`,§4.2):集成方案配置本身要设计器 UI。
+
+## 7. 来源清单
 **探针实测(本机 local-cosmic,GET)**:§2 表 19 条,原始输出留存于临时目录 `probes.txt/probes2.txt/probes3.txt`。
 
 **jar 反编译(本地 `C:\cosmic\mservice-cosmic\lib\bos\`,javap 1.8)**:

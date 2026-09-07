@@ -17,7 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import __version__, api, auth, config, data, settings
+from . import __version__, api, auth, config, convert, data, settings
 from .envelope import fail, ok
 
 # devportal ai-meta 端点表(来源: 灵基 app-build 技能 cosmic-meta-api 端点目录)
@@ -249,7 +249,8 @@ def cmd_data(args) -> None:
     published, failed_list, took = [], [], []
     for op in expanded:
         api_id, err, urlformat = data.gen_api(env, form, appid, prefix, op, metadata,
-                                              status=args.status, took=took)
+                                              status=args.status, took=took,
+                                              query_id_optional=getattr(args, "query_id_optional", False))
         if api_id:
             published.append({"operation": op, "number": f"{form}_{op}",
                               "urlformat": urlformat, "apiId": api_id})
@@ -262,8 +263,60 @@ def cmd_data(args) -> None:
                      "query 需带分页参数(如 pageNo=1&pageSize=10)"} if published else None)
 
 
-# ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
+def cmd_convert_rule(args) -> None:
+    """ly convert-rule — BOTP 转换规则只读通道(工单 #13;契约见 convert.py)。"""
+    env = _resolve_env(args)
+    if args.cr_cmd == "publish-list":
+        preview = {"env": env["name"], "form": convert.RULE_FORM, "operations": ["query(瘦列表)"],
+                   "status": args.status, "endpoint": data.GEN_V2_API_PATH,
+                   "note": "upsert by urlformat;响应列=头部标量(不含单据体),请求过滤全可选"}
+        write_gate(env, "POST", data.GEN_V2_API_PATH, preview,
+                   confirm=args.confirm, dry_run=args.dry_run)
+        if args.dry_run:
+            return
+        took: list = []
+        try:
+            api_id, err, urlformat = convert.publish_list_contract(env, status=args.status, took=took)
+        except Exception as e:  # noqa: BLE001 — 呈现为结构化错误信封
+            fail("metadata", "contract_failed", str(e)[:300],
+                 "先跑 `ly meta query-forms --params '{\"keyword\":\"convertrule\"}'` 确认实体仍在")
+        if api_id:
+            ok({"published": True, "number": f"{convert.RULE_FORM}_query",
+                "urlformat": urlformat, "apiId": api_id},
+               meta={"took_ms": sum(took),
+                     "hint": f"试一试: ly convert-rule list / ly convert-rule get --id <ruleId>"})
+        else:
+            fail("api", "publish_failed", err or "未知错误",
+                 "genV2ApiByMetaData 被拒;核对开放平台在线状态后重试")
+        return
+    # list / get:纯只读查询
+    if args.cr_cmd == "list":
+        body = convert.query(env, rule_id=getattr(args, "id", None),
+                             source=args.source, target=args.target,
+                             name=args.name, fid=args.fid,
+                             page_no=int(args.page_no), page_size=int(args.page_size))
+    else:  # get
+        body = convert.query(env, rule_id=args.id)
+    if not body.get("status"):
+        fail("api", body.get("errorCode"), body.get("message", "query 失败"),
+             "契约未发布或被改动:先 `ly convert-rule publish-list --confirm` 重发瘦列表契约")
+    d = body.get("data") or {}
+    rows = d.get("rows") or []
+    if args.cr_cmd == "get":
+        if not rows:
+            fail("api", "not_found", f"ruleId={args.id} 无匹配规则",
+                 "先 `ly convert-rule list` 看环境中现存的规则 id")
+        ok(rows[0], meta=body.get("meta"))
+        return
+    ok({"rows": rows, "totalCount": d.get("totalCount"), "pageNo": d.get("pageNo"),
+        "pageSize": d.get("pageSize"), "lastPage": d.get("lastPage")},
+       meta={**(body.get("meta") or {}),
+             "hint": "ruleId=rows[].id(数字主键,T_BOTP_ConvertRule);"
+                     "下推用: ly data operate --form <源单> --operation push --id <源单id> "
+                     "--params '{\"targetBill\":...,\"ruleId\":...}'"})
 
+
+# ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
 def write_gate(env: dict, method: str, path: str, payload, params=None,
                confirm: bool = False, dry_run: bool = False) -> None:
     """write-mode=confirm 时,非 GET 请求默认 dry-run;--confirm 放行。
@@ -429,6 +482,9 @@ def build_parser() -> argparse.ArgumentParser:
     pub_p.add_argument("--prefix", default=None, help="API 名称前缀(默认取实体中文名)")
     pub_p.add_argument("--status", default="C", choices=["A", "B", "C", "D"],
                        help="API 状态:A=内测/B=维护/C=发布/D=禁用,默认 C")
+    pub_p.add_argument("--query-id-optional", action="store_true",
+                       help="query 契约的 id 改为可选(默认必填):同契约兼得分页列全量能力;"
+                            "对已发布 API 重发即整体替换(upsert by urlformat)")
     pub_p.add_argument("--confirm", action="store_true",
                        help="write-mode=confirm 时,真执行必须携带")
     pub_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
@@ -460,6 +516,33 @@ def build_parser() -> argparse.ArgumentParser:
     op_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
     common(op_p)
     op_p.set_defaults(func=cmd_data)
+
+    cr_p = sub.add_parser("convert-rule",
+                          help="单据转换(BOTP)规则只读通道:publish-list/list/get")
+    cr_sub = cr_p.add_subparsers(dest="cr_cmd", required=True)
+    crpl_p = cr_sub.add_parser("publish-list",
+                               help="发布/替换 botp_convertrule 瘦列表 query 契约(走写操作门)")
+    crpl_p.add_argument("--status", default="C", choices=["A", "B", "C", "D"],
+                        help="API 状态:A=内测/B=维护/C=发布/D=禁用,默认 C")
+    crpl_p.add_argument("--confirm", action="store_true",
+                        help="write-mode=confirm 时,真执行必须携带")
+    crpl_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(crpl_p)
+    crpl_p.set_defaults(func=cmd_convert_rule)
+    crls_p = cr_sub.add_parser("list", help="分页列出环境内转换规则(可按源单/目标单/名称过滤)")
+    crls_p.add_argument("--source", help="源单编码过滤,如 ly_test_bill_a1")
+    crls_p.add_argument("--target", help="目标单编码过滤")
+    crls_p.add_argument("--name", help="规则名称精确过滤(fname)")
+    crls_p.add_argument("--fid", help="规则唯一标识精确过滤(fid,字符串)")
+    crls_p.add_argument("--id", help="按数字主键(ruleId)精确过滤")
+    crls_p.add_argument("--page-no", default=1)
+    crls_p.add_argument("--page-size", default=20)
+    common(crls_p)
+    crls_p.set_defaults(func=cmd_convert_rule)
+    crget_p = cr_sub.add_parser("get", help="按数字主键(ruleId)读单条规则头部配置")
+    crget_p.add_argument("--id", required=True, help="ruleId(rows[].id,数字主键)")
+    common(crget_p)
+    crget_p.set_defaults(func=cmd_convert_rule)
 
     doc_p = sub.add_parser("doctor", help="环境体检:配置→连通→认证")
     common(doc_p)

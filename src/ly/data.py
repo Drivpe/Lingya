@@ -238,6 +238,8 @@ def build_save_body_entries(metadata: dict) -> list[dict]:
 
 def _append_field(result, param_prefix, prop_type, display, level, pid,
                   objpropname_prefix=""):
+    # 显示名可能为空(系统字段常见),bodyparamdes/respdes 是服务端必填,回退到参数名
+    display = display or param_prefix
     raw = param_prefix.rsplit("_", 1)[-1]
     obj_base = f"{objpropname_prefix}{raw}" if objpropname_prefix else param_prefix
     common = {"must": "0", "body_level": level, "is_unique_key": False}
@@ -298,8 +300,8 @@ ID_FILTER = [{"filter_column": "id", "filter_compare": "EQUAL",
               "filter_value": "id", "filter_type": "Long", "filter_label": "id"}]
 
 
-def _id_row() -> dict:
-    return {"paramname": "id", "objpropname": "id", "paramtype": "Long", "must": "1",
+def _id_row(must: str = "1") -> dict:
+    return {"paramname": "id", "objpropname": "id", "paramtype": "Long", "must": must,
             "body_level": "1", "bodyparamdes": "id", "example": _example("Long"),
             "body_data_model": "LongProp", "is_unique_key": True}
 
@@ -371,7 +373,8 @@ def fetch_metadata(env: dict, entity_number: str) -> dict:
 
 def gen_api(env: dict, bizobject: str, appid: str, name_prefix: str,
             operation: str, metadata: dict, status: str = "C",
-            took: list | None = None) -> tuple[str | None, str | None, dict | None]:
+            took: list | None = None, query_id_optional: bool = False
+            ) -> tuple[str | None, str | None, dict | None]:
     """构造并提交单个操作 API;返回 (api_id, error, urlformat)。"""
     op_cn = OPERATION_CN.get(operation, operation)
     urlformat = f"/v2/open/{bizobject}/{operation}"
@@ -394,7 +397,8 @@ def gen_api(env: dict, bizobject: str, appid: str, name_prefix: str,
         body["data"]["respentryentity"] = []
         body["data"]["filter_entity"] = []
     elif operation == "query":
-        body["data"]["bodyentryentity"] = [_id_row()]
+        # id 必填=按 id 查单条(默认);id 可选=同契约可分页列全量(C 线 convert-rule list 依赖)
+        body["data"]["bodyentryentity"] = [_id_row(must="0" if query_id_optional else "1")]
         body["data"]["respentryentity"] = resp_from_body(save_entries)
         body["data"]["filter_entity"] = json.loads(json.dumps(ID_FILTER))
     else:
