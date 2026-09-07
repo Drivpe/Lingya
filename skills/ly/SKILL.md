@@ -34,11 +34,43 @@ ly meta entity-fields --params '{"formNumber":"..."}' # 实体字段
 ly meta build-meta --data '<buildMeta 需求产物 JSON>' [--confirm]   # 新建表单(设计器建模)
 ly meta modify-meta --data '<modifyMeta MetaOps JSON>' [--confirm]  # 已有表单增/删/改字段与实体
 
+ly data precheck --form <表单编码>                    # 四项检查:表单存在/元数据可取/操作可查/开放平台在线
+ly data publish --form <表单编码> --operations save,query,submit,audit [--confirm]  # 自动注册 v2 操作 API
+ly data save --form <表单编码> --data '{"title":"x","qty":5}' [--confirm]  # 写业务数据(传 id=更新,不传=新增)
+ly data query --form <表单编码> --id <单据id>          # 按 id 读回(发布契约必带 id+分页)
+ly data operate --form <表单编码> --operation submit --id <单据id> [--confirm]  # 生命周期:submit/audit/unaudit/unsubmit/delete
+ly api GET /kapi/v2/open/<表单编码>/query --params '{"id":"1","pageNo":"1","pageSize":"10"}'  # 任意已发布 API 兜底
+ly api POST /kapi/v2/open/<表单编码>/save --data '{"data":{...}}' --confirm   # 原始调用(save 的 body 须包 data 层)
+
 ly api GET /kapi/v2/devportal/ai-meta/queryForms --params '{"keyword":"X"}'   # 任意端点兜底
 ly config set write-mode free                       # 关闭写操作门(用户明确要求后才做)
 ```
 
 环境选择:`-e <环境名>`;缺省取 `isDefault`。
+
+## 业务数据通道配方(2026-09-07 实测)
+
+自建单据要能被业务 API 读写,按序三步:
+
+1. **建单时**:`build-meta` 的 artifact 实体**必须带 `tableName`(规则 `tk_{entityKey}`)**——缺了会得到占位表 `t_isv_xxx` 且无物理表,调用时报"关系不存在"。补救:`modify-meta` 对实体 `modify` tableName,平台会自动补建物理表。
+2. **补操作**:骨架单可能缺标准操作(save/submit/audit 等)——`ly api POST /kapi/v2/devportal/ai-meta/operation/listOperations --data '{"formNumber":"..."}'` 查现有;缺就用 `addOperation`(必填 `formNumber/operationType/operationKey/operationName`)逐个挂,或建单时在 artifact 的 `operations` 里声明。挂完用 `ly data precheck` 确认操作列表。
+3. **发布与调用**:`ly data publish --form X --operations save,query,submit,audit --confirm` → 每个操作得到一个 `apiId` + `urlformat /v2/open/<form>/<op>`;调用路径 = `/kapi/v2` + urlformat。**query 必带 `id` + `pageNo`/`pageSize`**(发布契约按 id 精确查);**save 的 body 必须包 `data` 层**(`{"data":{...业务字段}}`),`ly data save` 已自动包裹;候选键语义:传 id=更新(返回 type=Update),不传=新增;**未知字段会被服务端静默忽略**(不报错),字段名必须与实体属性精确一致;类型不匹配会返回结构化 error。
+4. **生命周期与状态读回**:`ly data operate --operation submit|audit|unaudit|unsubmit|delete --id <id> --confirm`。操作 API 对状态迁移**宽松幂等**(重复同向操作也报成功);**状态读回用对向操作探针**:unaudit 成功即证处于已审核态、unsubmit 成功即证处于已提交态。id 不存在返回结构化 error(`未查找到需要xx的数据`)。注意:骨架单实体**没有 billno/billstatus 系统字段**(禁止 modify-meta 手工创建,buildMeta artifact 也不带),生命周期状态只存在于操作层,query 读不回状态字段——buildMeta 建单时若需完整单据语义,优先考虑在需求产物中声明(或接受操作探针方案)。
+
+## 元数据层验证配方(建→改→读回断言,2026-09-07 实测)
+
+给 agent 的标准自建单据验证闭环,四步:
+
+1. **建单**:`ly meta build-meta --data '<JSON>' --confirm`。请求体**平铺**(不要再包 `model`/`buildMeta` 外层),必填 `bizAppId` + `artifact`:
+   ```json
+   {"bizAppId":"<应用id>","artifact":{"requirementId":"<唯一id>","mode":"EXPERT","version":1,"status":"APPROVED","entities":[{"id":"e1","entityKey":"<表单标识>","displayName":"<名称>","type":"BillEntity","status":"CONFIRMED","tableName":"tk_<entityKey>","fields":[{"id":"f1","fieldKey":"<key>","columnName":"fk_<isv>_<业务词>","displayName":"<名称>","dataType":"TextField","status":"CONFIRMED"}]}]}}
+   ```
+   - `artifact` 是 `RequirementArtifact` 结构(见 references/endpoints.md 全表);`tableName` 规则 `tk_{entityKey}`、`columnName` 规则 `fk_{isv}_{业务词}`,缺失会被服务端逐条退回(按提示补齐即可)。
+   - 返回 `entityResults[].success` 逐实体判定;报"表单已存在"说明之前已建过。
+   - **应用权限**:`buildMeta` 只能落在当前开发商有资源权限的应用;用 `ly meta biz-apps` 找 `<isv>_*` 前缀的自属应用(isv 号见 `ly meta get-dev-info`)。
+2. **改字段**:`ly meta modify-meta --data '<JSON>' --confirm`。请求体平铺 `{"formId":"<formId>","ops":[...]}`;op 结构 `{idempotencyKey, op:"add|modify|remove|move|bind|unbind|createModel", target:{treeType:"entity|form|mobform|moblist", elementType:"field|entity|...", locateBy:"key|id|path", value}, value:{fieldKey, fieldName, columnName, fieldType, ...}}`。add 字段时 `columnName` 必须显式给出。
+3. **读回断言**:`ly meta entity-fields --params '{"formNumber":"<表单标识>"}'`(注意用 **formNumber** 不是 formId)与 `ly meta form-schema`,逐项核对 key/fieldType 与预期一致。
+4. **失败处理**:所有失败已是结构化信封(`error.code` 如 `INVALID_ARTIFACT`/`NOT_ALLOWED`);`INVALID_ARTIFACT` 的 Jackson 报错会指明期望类型,照改即可;不要盲目重试同载荷。
 
 ## 渐进加载
 

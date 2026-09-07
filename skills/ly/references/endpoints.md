@@ -1,7 +1,22 @@
 # devportal ai-meta 端点全表(来源:灵基 app-build 技能 cosmic-meta-api)
 
 GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <path>`。
-**已包装的写端点**:`ly meta build-meta --data '<JSON>'`(buildMeta,新建表单)、`ly meta modify-meta --data '<JSON>'`(modifyMeta,MetaOps 增删改)——走写操作门;请求体形状见灵基 app-build `cosmic-meta-api/apis/ai_meta.md`。
+**已包装的写端点**:`ly meta build-meta --data '<JSON>'`(buildMeta,新建表单)、`ly meta modify-meta --data '<JSON>'`(modifyMeta,MetaOps 增删改)——走写操作门。
+
+## 写端点请求体契约(2026-09-07 实测+反编译 bos-designer-ai-8.0.jar)
+
+- **请求体一律平铺**,不要包 `model`/`buildMeta`/`modifyMeta` 外层——包了外层服务端反而读不到字段(报 model.artifact 不能为空 这类误导性校验错)。
+- **buildMeta**:`{"bizAppId":"<appId>","artifact":<RequirementArtifact>}`。
+  - `RequirementArtifact`(kd.bos.designer.ai.model.dto):`{requirementId, sourceDoc, parsedAt, mode(EXPERT/GUIDED/STANDARD), version, status(PARSING/REVIEW_PENDING/APPROVED/DEPLOYED), entities:[RequirementEntity], relations, rules, plugins, operations, propertySettings, pendingSummary, sessionSummary, toolbarButtons, entryToolbar}`。
+  - `RequirementEntity`:`{id, entityKey, displayName, tableName, type(BillEntity/BaseEntity/FormEntity/ReportEntity/QueryEntity/EntryEntity/...), parentEntityId, description, status(CONFIRMED/PENDING/LOW_CONFIDENCE), confidence, fields:[RequirementField]}`。
+  - `RequirementField`:`{id, fieldKey, columnName, displayName, dataType(TextField/IntegerField/DecimalField/DateField/ComboField/BasedataField/QtyField/...), mustInput, comboOptions, comboValues, basedataNumber, ...}`。
+  - 服务端建模规则:`tableName` 必须 `tk_{entityKey}`;`columnName` 必须 `fk_{isv}_{业务词}`;缺一逐条退回(读 entityResults[].message 按提示补)。返回 `entityResults[].success` 逐实体判定;表单已存在则跳过。
+  - 权限:只能落在当前开发商有资源权限的应用(自属 `<isv>_*` 应用;isv 号来自 getDevInfo)。
+- **modifyMeta**:`{"formId":"<formId>","ops":[<MetaOp>]}`。
+  - `MetaOp`(kd.bos.designer.ai.copilot.model):`{idempotencyKey, op(add/modify/remove/move/bind/unbind/createModel), target:MetaTarget, path, value, extra}`。
+  - `MetaTarget`:`{treeType(entity/form/mobform/moblist), elementType(entity/field/toolbar/tab/control/button/listcolumn/...), locateBy(key/id/path), value, parentScope}`。
+  - add field 的 `value`(fieldDef):`{fieldKey, fieldName, columnName(必填), fieldType(或 dataType), mustInput, maxLength/minLength/password(TextField), scale/precision/zeroShow(Decimal), defValue, comboItems/comboOptions(Combo), basedataNumber(Basedata), afterField?}`;BillNoField/BillStatusField 由 createModel 自动补。
+  - 整体替换语义与读回校验同 updateOperation 家族;改后必须用 getEntityFields/getFormSchema 读回清点。
 
 ## ⚠️ 实测边界与坑(2026-09-07 本地苍穹验证)
 
@@ -31,7 +46,7 @@ GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <
 | getEntityType | /kapi/v2/devportal/ai-meta/getEntityType |
 | getFormMetadata | /kapi/v2/devportal/ai-meta/getFormMetadata |
 | getFormConfig | /kapi/v2/devportal/ai-meta/getFormConfig |
-| getEntityFields | /kapi/v2/devportal/ai-meta/getEntityFields |
+| getEntityFields | /kapi/v2/devportal/ai-meta/getEntityFields(**参数 formNumber**,不是 formId) |
 
 ## 元数据操作(二开第二步)
 | 端点 | 路径 |
@@ -39,6 +54,15 @@ GET 端点用 `ly meta <命令> --params '<JSON>'`;未包装的用 `ly api GET <
 | buildMeta | /kapi/v2/devportal/ai-meta/buildMeta |
 | modifyMeta | /kapi/v2/devportal/ai-meta/modifyMeta |
 | createPage | /kapi/v2/devportal/ai-meta/createPage |
+
+## 业务数据通道(开放平台 v2,2026-09-07 实测)
+| 端点 | 路径 | 说明 |
+|---|---|---|
+| getEntityOperations | POST /kapi/v2/open/openapi/getEntityOperations `{formNumber}` | 实体支持的操作列表;开放平台在线探针 |
+| genV2ApiByMetaData | POST /kapi/v2/open/openapi_apilist/genV2ApiByMetaData `{"data":{...}}` | upsert by urlformat,**整体替换**语义(三大子表必须显式携带) |
+| 业务调用 | `/kapi/v2` + 已发布 urlformat(如 /v2/open/{form}/{op}) | query 必带 id+pageNo/pageSize;save 候选键语义 |
+
+ly 封装:`ly data precheck`(四项检查)与 `ly data publish`(元数据→自动构造 bodyentryentity/respentryentity/filter_entity→不变量校验→提交,规则 A~E 含基础资料拆分/多选基础资料/弹性域)。主表字段契约:`number={form}_{op}`、`urlformat=/v2/open/{form}/{op}`、`apiservicetype=0`、`version=2`、`status=C`(发布);子表行必填:body 段 `paramname/paramtype/must/body_level/bodyparamdes/example`,resp 段 `respparamname/respparamtype/resp_level/respdes/respexample`,filter 段 `filter_column/filter_compare`;paramname 全局唯一 ≤50。
 
 ## 操作管理
 listOperationTypes / getOperationTypeSchema / addOperation / updateOperation / deleteOperation / listOperations / getOperation

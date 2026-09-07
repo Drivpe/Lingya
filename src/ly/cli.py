@@ -14,9 +14,10 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 
-from . import __version__, api, auth, config, settings
+from . import __version__, api, auth, config, data, settings
 from .envelope import fail, ok
 
 # devportal ai-meta 端点表(来源: 灵基 app-build 技能 cosmic-meta-api 端点目录)
@@ -116,6 +117,149 @@ def cmd_meta(args) -> None:
     t0 = time.time()
     body = api.call(env, method, path, payload=None, params=params)
     _unwrap(body, took_ms=int((time.time() - t0) * 1000))
+
+
+# ── data(业务数据通道前置:precheck/publish) ─────────────────────────────────
+
+def cmd_data(args) -> None:
+    env = _resolve_env(args)
+    form = args.form
+    # save / query:已发布操作 API 的业务数据读写
+    if args.data_cmd == "save":
+        try:
+            payload = json.loads(args.data) if args.data else None
+        except json.JSONDecodeError as e:
+            fail("args", "bad_json", f"--data 不是合法 JSON: {e}")
+        if not isinstance(payload, dict):
+            fail("args", "bad_data", "--data 必须是 JSON 对象(扁平业务字段)")
+        wrapped = {"data": payload}
+        path = f"/kapi/v2/open/{form}/save"
+        write_gate(env, "POST", path, wrapped, confirm=args.confirm, dry_run=args.dry_run)
+        t0 = time.time()
+        body = api.call(env, "POST", path, payload=wrapped)
+        if not body.get("status"):
+            fail("api", body.get("errorCode"), body.get("message", "save 失败"),
+                 "候选键语义:传 id=更新,不传=新增;字段名须与实体属性一致")
+        d = body.get("data") or {}
+        result = d.get("result") or []
+        bill_id = result[0].get("id") if result and result[0].get("billStatus") else None
+        ok({"billId": bill_id, "result": result,
+            "successCount": d.get("successCount"), "failCount": d.get("failCount")},
+           meta={"took_ms": int((time.time() - t0) * 1000),
+                 "hint": f"读回: ly data query --form {form} --id {bill_id}" if bill_id else None})
+    if args.data_cmd == "query":
+        params = {"pageNo": str(args.page_no), "pageSize": str(args.page_size)}
+        if args.id:
+            params["id"] = str(args.id)
+        if args.params:
+            params.update(json.loads(args.params))
+        path = f"/kapi/v2/open/{form}/query"
+        t0 = time.time()
+        body = api.call(env, "GET", f"{path}?{urllib.parse.urlencode(params)}")
+        if not body.get("status"):
+            fail("api", body.get("errorCode"), body.get("message", "query 失败"),
+                 "query 发布契约必带 id+分页;字段集由发布时的返回参数定义固化")
+        ok(body.get("data"), meta={"took_ms": int((time.time() - t0) * 1000)})
+
+    # operate:已发布操作 API 的生命周期操作(submit/audit/unaudit/unsubmit/delete/push...)
+    if args.data_cmd == "operate":
+        params = {"id": str(args.id)}
+        if args.params:
+            params.update(json.loads(args.params))
+        wrapped = {"data": params}
+        path = f"/kapi/v2/open/{form}/{args.operation}"
+        write_gate(env, "POST", path, wrapped, confirm=args.confirm, dry_run=args.dry_run)
+        t0 = time.time()
+        body = api.call(env, "POST", path, payload=wrapped)
+        if not body.get("status"):
+            fail("api", body.get("errorCode"), body.get("message", f"{args.operation} 失败"),
+                 "状态迁移前置不满足或 id 不存在;操作 API 宽松语义:重复同向操作可能幂等成功")
+        d = body.get("data") or {}
+        result = d.get("result") or []
+        errs = [e for r in result for e in (r.get("errors") or [])]
+        ok({"operation": args.operation, "id": args.id,
+            "successCount": d.get("successCount"), "totalCount": d.get("totalCount"),
+            "failCount": d.get("failCount"), "result": result, "errors": errs},
+           meta={"took_ms": int((time.time() - t0) * 1000),
+                 "hint": "状态读回可用对向操作探测:audit 后 unaudit 成功即证处于已审核态"})
+
+    if args.data_cmd == "precheck":
+        checks, meta_info, operations, hints = [], {}, [], []
+        body = api.call(env, "GET", f"/kapi/v2/devportal/ai-meta/queryForms?"
+                                    f"{urllib.parse.urlencode({'keyword': form})}")
+        forms = [f for f in (body.get("data") or [])
+                 if isinstance(f, dict) and f.get("formNumber") == form] if body.get("status") else []
+        checks.append({"check": "form_exists", "ok": bool(forms),
+                       "detail": forms[0]["formId"] if forms else f"未找到表单 {form}"})
+        try:
+            metadata = data.fetch_metadata(env, form)
+            bill = metadata.get("BillEntity", {})
+            meta_info = {"bizAppNumber": bill.get("bizAppNumber", ""),
+                         "displayname": bill.get("displayname", ""),
+                         "headerFields": len(bill.get("fields", [])),
+                         "entries": len(bill.get("entries", []))}
+            checks.append({"check": "metadata", "ok": True, "detail": json.dumps(meta_info, ensure_ascii=False)})
+        except Exception as e:  # noqa: BLE001 — precheck 把一切失败呈现为检查项
+            checks.append({"check": "metadata", "ok": False, "detail": str(e)[:200]})
+            hints.append("元数据不可取时无法发布操作 API;先确认表单编码与元数据完整性")
+        try:
+            ops = data.call_entity_operations(env, form)
+            operations = ops
+            detail = f"支持操作: {', '.join(ops)}" if ops else "getEntityOperations 返回空"
+            checks.append({"check": "openapi_online", "ok": bool(ops), "detail": detail})
+        except Exception as e:  # noqa: BLE001
+            checks.append({"check": "openapi_online", "ok": False, "detail": str(e)[:200]})
+            hints.append("开放平台服务不可达/未初始化:先在【开放服务云 → OpenAPI → 初始化】执行初始化,再重试")
+        failed = [c for c in checks if not c["ok"]]
+        ok({"checks": checks, "metadata": meta_info, "operations": operations,
+            "hints": hints, "ready_to_publish": not failed},
+           meta={"env": env["name"], "pass": not failed})
+        return
+
+    # publish
+    operations = [op.strip() for op in (args.operations or "").split(",") if op.strip()]
+    if not operations:
+        fail("args", "missing_operations", "--operations 必填,如 save,query,submit,audit")
+    preview = {"env": env["name"], "form": form, "operations": operations,
+               "status": args.status,
+               "endpoint": data.GEN_V2_API_PATH,
+               "note": "upsert by urlformat(整体替换语义);将按 getEntityType 元数据自动构造三大子表"}
+    write_gate(env, "POST", data.GEN_V2_API_PATH, preview,
+               confirm=args.confirm, dry_run=args.dry_run)
+    if args.dry_run:
+        return
+    try:
+        metadata = data.fetch_metadata(env, form)
+    except Exception as e:  # noqa: BLE001
+        fail("metadata", "fetch_failed", str(e)[:300],
+             "先跑 `ly data precheck --form <表单>` 看元数据检查项")
+    bill = metadata.get("BillEntity", {})
+    appid = args.appid or bill.get("bizAppNumber", "") or fail(
+        "metadata", "no_app", "元数据缺 BizAppNumber,用 --appid 显式指定所属应用编码")
+    prefix = args.prefix or bill.get("displayname", "") or form
+    try:
+        all_ops = data.call_entity_operations(env, form)
+    except Exception as e:  # noqa: BLE001
+        fail("openapi", "operations_failed", str(e)[:300])
+    expanded = [op for op in operations if op in all_ops]
+    skipped = [op for op in operations if op not in all_ops]
+    if not expanded:
+        fail("args", "unsupported_operations",
+             f"实体不支持所请求操作;支持: {', '.join(all_ops)}")
+    published, failed_list, took = [], [], []
+    for op in expanded:
+        api_id, err, urlformat = data.gen_api(env, form, appid, prefix, op, metadata,
+                                              status=args.status, took=took)
+        if api_id:
+            published.append({"operation": op, "number": f"{form}_{op}",
+                              "urlformat": urlformat, "apiId": api_id})
+        else:
+            failed_list.append({"operation": op, "error": err})
+    ok({"published": published, "failed": failed_list, "skipped": skipped,
+        "appid": appid, "name_prefix": prefix},
+       meta={"took_ms": sum(took),
+             "hint": "发布后用 GET /kapi/v2/<urlformat 去掉 /v2 前缀> 调用;"
+                     "query 需带分页参数(如 pageNo=1&pageSize=10)"} if published else None)
 
 
 # ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
@@ -270,6 +414,52 @@ def build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("key", choices=["write-mode"])
     set_p.add_argument("value", choices=["confirm", "free"])
     cfg_p.set_defaults(func=cmd_config)
+
+    data_p = sub.add_parser("data", help="业务数据通道前置:precheck/publish(开放平台 v2 操作 API)")
+    data_sub = data_p.add_subparsers(dest="data_cmd", required=True)
+    pre_p = data_sub.add_parser("precheck", help="四项检查:表单存在/元数据可取/操作可查/开放平台在线")
+    pre_p.add_argument("--form", required=True, help="表单/实体编码,如 ly_test_bill_a1")
+    common(pre_p)
+    pre_p.set_defaults(func=cmd_data)
+    pub_p = data_sub.add_parser("publish", help="按元数据自动构造并注册 v2 操作 API(走写操作门)")
+    pub_p.add_argument("--form", required=True, help="表单/实体编码")
+    pub_p.add_argument("--operations", required=True,
+                       help='逗号分隔,如 "save,query,submit,audit"(query 生成 GET 查询 API)')
+    pub_p.add_argument("--appid", default=None, help="所属应用编码(默认取元数据 BizAppNumber)")
+    pub_p.add_argument("--prefix", default=None, help="API 名称前缀(默认取实体中文名)")
+    pub_p.add_argument("--status", default="C", choices=["A", "B", "C", "D"],
+                       help="API 状态:A=内测/B=维护/C=发布/D=禁用,默认 C")
+    pub_p.add_argument("--confirm", action="store_true",
+                       help="write-mode=confirm 时,真执行必须携带")
+    pub_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(pub_p)
+    pub_p.set_defaults(func=cmd_data)
+    save_p = data_sub.add_parser("save", help="调已发布 save API 写入业务数据(走写操作门)")
+    save_p.add_argument("--form", required=True, help="表单/实体编码")
+    save_p.add_argument("--data", required=True,
+                        help='业务字段 JSON(扁平),如 \'{"title":"x","qty":5}\';传 id=更新,不传=新增')
+    save_p.add_argument("--confirm", action="store_true", help="write-mode=confirm 时,真执行必须携带")
+    save_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(save_p)
+    save_p.set_defaults(func=cmd_data)
+    qry_p = data_sub.add_parser("query", help="调已发布 query API 读回业务数据")
+    qry_p.add_argument("--form", required=True, help="表单/实体编码")
+    qry_p.add_argument("--id", default=None, help="按单据 id 精确查(发布契约必带)")
+    qry_p.add_argument("--page-no", default=1)
+    qry_p.add_argument("--page-size", default=10)
+    qry_p.add_argument("--params", help='额外查询参数 JSON,如 \'{"title":"x"}\'(须在发布契约内)')
+    common(qry_p)
+    qry_p.set_defaults(func=cmd_data)
+    op_p = data_sub.add_parser("operate", help="调已发布操作 API 执行生命周期动作(submit/audit/unaudit/unsubmit/delete)")
+    op_p.add_argument("--form", required=True, help="表单/实体编码")
+    op_p.add_argument("--operation", required=True,
+                      help="操作名=已发布 API 的 operation,如 submit/audit/unaudit/unsubmit/delete")
+    op_p.add_argument("--id", required=True, help="目标单据 id")
+    op_p.add_argument("--params", help='附加查询条件 JSON,合并进 data')
+    op_p.add_argument("--confirm", action="store_true", help="write-mode=confirm 时,真执行必须携带")
+    op_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(op_p)
+    op_p.set_defaults(func=cmd_data)
 
     doc_p = sub.add_parser("doctor", help="环境体检:配置→连通→认证")
     common(doc_p)
