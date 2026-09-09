@@ -334,7 +334,7 @@ def cmd_convert_rule(args) -> None:
                             "重复同向操作会报状态前置错误(非幂等)"})
         return
     if args.cr_cmd == "new":
-        fields = json.loads(args.set) if args.set else {}
+        fields = _json_arg(getattr(args, "set", None))
         write_gate(env, "POST", f"session:{convert.RULE_EDIT_FORM}#ADDNEW/btnsave",
                    {"source": args.source, "target": args.target,
                     "name": args.name, "extra_fields": fields},
@@ -350,7 +350,7 @@ def cmd_convert_rule(args) -> None:
                             "name 读回值可断言"})
         return
     if args.cr_cmd == "save":
-        fields = json.loads(args.set) if args.set else {}
+        fields = _json_arg(args.set)
         if not fields:
             fail("args", "fields_required",
                  "--set 必须给至少一个字段,如 --set '{\"fname\":\"新名\"}'",
@@ -386,6 +386,9 @@ def cmd_convert_rule(args) -> None:
 
 
 # ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
+def _json_arg(raw: str | None) -> dict:
+    """--set 之类 JSON 参数解析;空/None → {}。"""
+    return json.loads(raw) if raw else {}
 def write_gate(env: dict, method: str, path: str, payload, params=None,
                confirm: bool = False, dry_run: bool = False) -> None:
     """write-mode=confirm 时,非 GET 请求默认 dry-run;--confirm 放行。

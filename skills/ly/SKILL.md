@@ -53,6 +53,8 @@ ly convert-rule disable --id <ruleId> --confirm       # 停用规则(非幂等:�
 
 ly convert-rule new --source <源单> --target <目标单> --name <名称> [--set '{"k":"v"}'] --confirm   # 新建规则(ADDNEW+btnsave;路线已有规则时复用该行同 id;2026-09-09 实测)
 ly convert-rule save --id <ruleId> --set '{"fname":"新名"}' --confirm   # 编辑既有规则字段(kingdee 规则被 st 锁不可写;同路线多规则时可能报 route_ambiguity)
+# 为何双命令而 ly data save 是单命令:新建必带 --source/--target 定位、编辑用 --id,
+# 参数形态不同;分开后写门预览与读回断言各自清晰(用户 2026-09-09 决策)。
 
 ly api GET /kapi/v2/devportal/ai-meta/queryForms --params '{"keyword":"X"}'   # 任意端点兜底
 ly config set write-mode free                       # 关闭写操作门(用户明确要求后才做)
