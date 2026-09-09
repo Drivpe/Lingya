@@ -58,6 +58,11 @@ def _post(env: dict, path: str, payload: dict) -> dict:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
+        if e.code == 401:
+            # SKILL 铁律 4:401=密钥错误/被锁。服务端有密钥错误锁定,连续重试会加重锁定。
+            raise AuthError("auth_locked_or_bad_secret",
+                            "getToken 401:应用密钥(client_secret)错误或已被锁定;"
+                            "请核对密钥后重试,勿连续重试(限流 30 次/分,错误会触发锁定)") from e
         raise AuthError(e.code, f"HTTP {e.code}: {detail}") from e
     except urllib.error.URLError as e:
         raise AuthError("network", f"连接失败 {env['url']}: {e.reason}") from e

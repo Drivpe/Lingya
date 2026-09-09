@@ -38,4 +38,6 @@ def set_write_mode(mode: str) -> None:
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
     data = load()
     data["write_mode"] = mode
-    settings_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = settings_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(settings_path())

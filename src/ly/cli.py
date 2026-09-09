@@ -69,6 +69,7 @@ def cmd_auth(args) -> None:
             "client_secret": args.client_secret or "",
             "username": args.username or "",
             "acgw": args.acgw or "",
+            **({"datacenter": args.datacenter} if args.datacenter else {}),
             **({"normalAccessToken": True} if args.normal else {}),
             **({"isDefault": True} if args.default else {}),
         })
@@ -406,8 +407,9 @@ def cmd_doctor(args) -> None:
         fail("doctor", "no_env", "没有任何环境配置", "ly auth add --name X --url ... --account-id ... --client-id ...")
     env = config.get_env(args.env)
     checks.append({"check": "env", "ok": True, "detail": f"{env['name']} -> {env['url']}"})
-    missing = [k for k in ("accountId", "client_id", "client_secret") if not env[k]]
-    checks.append({"check": "credentials", "ok": not missing, "detail": "缺失: " + ",".join(missing) if missing else "齐全"})
+    missing = [k for k in ("accountId", "client_id", "client_secret", "username") if not env.get(k)]
+    checks.append({"check": "credentials", "ok": not missing,
+                   "detail": "缺失: " + ",".join(missing) if missing else "五要素齐全"})
     try:
         urllib.request.urlopen(env["url"] + "/login.html", timeout=8)
         checks.append({"check": "reachable", "ok": True, "detail": env["url"]})
@@ -445,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--client-secret", default="")
     add_p.add_argument("--username", default="")
     add_p.add_argument("--acgw", default="", help="网关标识 x-acgw-identity")
+    add_p.add_argument("--datacenter", default="", help="数据中心(可选要素)")
     add_p.add_argument("--normal", action="store_true", help="normal 两步认证(getAppToken.do+login.do)")
     add_p.add_argument("--default", action="store_true")
     for name in ("show", "login", "test", "logout"):

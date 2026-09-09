@@ -113,5 +113,7 @@ def save_env(name: str, fields: dict) -> None:
     cfg.setdefault("language", "zh_CN")
     p = config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # 原子写:凭证文件中途损坏 = 全部环境失联,先落临时文件再 rename
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
