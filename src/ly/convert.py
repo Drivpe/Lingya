@@ -1,14 +1,16 @@
 """ly convert-rule — 单据转换(BOTP)规则只读通道 v2(工单 #13 / C2)。
 
-苍穹无 BOTP OpenAPI(调研 docs/research-转换规则端点契约调研.md §2/§8),双通道拼图:
+苍穹无 BOTP OpenAPI(调研 docs/research-转换规则端点契约调研.md §2/§8),
+文档 docs/research/2026-09-09-batchInvokeAction-选中态与过滤契约.md,双通道拼图:
   - list  走 Web 会话通道:botp_convertpath(转换路线列表)getConfig→loadData,
           返回环境内全部转换路线(源单/目标单编码+名称)。限制:服务端分页 500 条/页,
-          目前仅首屏可取(page 2+ 传输格式未破解),全量见 issue #13 备注。
+          目前仅首屏可取(page 2+ 传输格式未破解);--search 走服务端过滤(searchpath
+          .search,对全量缓存 indexOf 匹配)不受首屏限制。
   - get   走 OpenAPI 通道:botp_crlist(转换规则,基础资料实体,物理表 T_BOTP_ConvertRule)
           已发布 query 契约(--query-id-optional),按 ruleId 精确读整行。
-  - detail 走 Web 会话通道:modify 链打开规则详情(当前固定落在本页第一行,
-          网格选中态的传输格式未破解,见 #13),解析出规则树(ruleId)、表单字段值、
-          字段映射网格——证明详情解析链路,C3 写入复用同一会话。
+  - detail 走 Web 会话通道:--source/--target 直开指定规则详情(getConfig 自定义
+          参数 SourceBill/TargetBill,活体实证);无参数时 modify 链打开第一行。
+          解析出规则树(ruleId)、表单字段值、字段映射网格——C3 写入复用同一会话。
 """
 
 from __future__ import annotations
@@ -91,26 +93,107 @@ def get_rule(env: dict, rule_id: str) -> dict:
     return rows[0]
 
 
-# ── detail:规则详情解析(会话通道,当前固定打开本页第一行) ──────────────────
+# ── detail:规则详情解析(会话通道) ──────────────────────────────────────────
+_LOAD_DATA = [{"key": "", "methodName": "loadData", "args": [], "postData": []}]
+_MODIFY_POST = [{"treeviewap": {"focus": {"id": "0", "parentid": "", "text": "业务云",
+                                          "isParent": True}}}, []]
+
+
+def _parse_grid_data(acts: list) -> dict | None:
+    """从动作流取 entryentity 数据块(dataindex+rows+rowcount);无则 None。"""
+    for a in acts:
+        if not (isinstance(a, dict) and isinstance(a.get("p"), list)):
+            continue
+        for c in a["p"]:
+            if isinstance(c, dict) and c.get("methodname") in ("setRows", "addRows",
+                                                               "insertRows"):
+                pass  # 网格重绘走这里,但列表数据块在 'u' 动作
+        p0 = a["p"][0] if a["p"] else None
+        if isinstance(p0, dict) and "data" in p0:
+            return p0["data"]
+    return None
+
+
+def _rows_from_data(data: dict) -> list:
+    """数据块 → 路线路字典列表(seq/源/目标编码+名称)。"""
+    idx = data["dataindex"]
+    out = []
+    for r in data.get("rows") or []:
+        out.append({"seq": r[idx.get("seq", 1)],
+                    "source": r[idx["fsourceentitynumber"]] or "",
+                    "source_name": r[idx["fsourceentityname"]] or "",
+                    "target": r[idx["ftargetentitynumber"]] or "",
+                    "target_name": r[idx["ftargetentityname"]] or ""})
+    return out
+
+
+def search_paths(env: dict, keyword: str, web_user: str | None = None,
+                 web_password: str | None = None) -> dict:
+    """服务端过滤搜索转换路线(searchpath.search,活体实证 2026-09-09)。
+
+    与 list_paths 的客户端过滤不同:search 在服务端对全量 1426 条缓存做
+    源/目标编码+名称的 indexOf 子串匹配,不受首屏 500 条限制。
+    注意:args 必须是包一层 List 的形态 [["关键词"]],单串会报「功能异常」。
+    返回 {"total_in_env", "matched", "paths"}。
+    """
+    s = _session(env, web_user, web_password)
+    pid = s.open_form(PATH_FORM)
+    s.invoke(PATH_FORM, "loadData", pid, _LOAD_DATA)
+    acts = s.invoke(PATH_FORM, "search", pid,
+                    [{"key": "searchpath", "methodName": "search",
+                      "args": [[keyword]], "postData": []}])
+    data = None
+    for a in acts:
+        if isinstance(a, dict) and a.get("a") == "u" and isinstance(a.get("p"), list):
+            for it in a["p"]:
+                if isinstance(it, dict) and isinstance(it.get("data"), dict) \
+                        and "rows" in it["data"]:
+                    data = it["data"]
+    if data is None:
+        raise SessionError("search 响应无数据块")
+    return {"total_in_env": data.get("datacount", len(data.get("rows") or [])),
+            "matched": len(data.get("rows") or []),
+            "paths": _rows_from_data(data)}
+
+
+def rule_detail(env: dict, source: str, target: str,
+                web_user: str | None = None,
+                web_password: str | None = None) -> dict:
+    """直开指定源/目标对的规则详情(getConfig 自定义参数路线,活体实证)。
+
+    服务端 FormShowParameter.createFormShowParameter 会把 params JSON 里
+    非 bean 属性的剩余键 setCustomParam(k,v);ConvertRuleEdit 从
+    getCustomParam("SourceBill"/"TargetBill") 取源/目标加载规则——
+    无需网格选中(网格选中态在无头通道不可传,entryRowClick 不写模型当前行)。
+    """
+    s = _session(env, web_user, web_password)
+    pid = s.open_form(RULE_FORM.replace("crlist", "convertrule"),
+                      extra_params={"SourceBill": source, "TargetBill": target})
+    t3 = s.raw_invoke(RULE_FORM.replace("crlist", "convertrule"), "loadData", pid,
+                      _LOAD_DATA)
+    out = parse_detail(t3)
+    out["source"] = source
+    out["target"] = target
+    return out
+
+
 def first_path_detail(env: dict, web_user: str | None = None,
                       web_password: str | None = None) -> dict:
     """modify 链打开第一行路线的规则详情,解析规则树/表单值/字段映射网格。"""
     s = _session(env, web_user, web_password)
     pid = s.open_form(PATH_FORM)
-    s.invoke(PATH_FORM, "loadData", pid,
-             [{"key": "", "methodName": "loadData", "args": [], "postData": []}])
+    s.invoke(PATH_FORM, "loadData", pid, _LOAD_DATA)
     t2 = s.raw_invoke(PATH_FORM, "modify", pid,
                       [{"key": "tbar_main", "methodName": "itemClick",
                         "args": ["btnmodify", "modify"],
-                        "postData": [{"treeviewap": {"focus": {"id": "0", "parentid": "",
-                                                               "text": "业务云", "isParent": True}}}, []]}])
+                        "postData": _MODIFY_POST}])
     j2 = json.loads(t2)
     show = next((a for a in j2 if isinstance(a, dict) and a.get("a") == "showForm"), None)
     if not show:
         raise SessionError(f"modify 未返回 showForm: {t2[:200]}")
     pid2 = show["p"][0]["pageId"]
     t3 = s.raw_invoke(RULE_FORM.replace("crlist", "convertrule"), "loadData", pid2,
-                      [{"key": "", "methodName": "loadData", "args": [], "postData": []}])
+                      _LOAD_DATA)
     return parse_detail(t3)
 
 

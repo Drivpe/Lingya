@@ -77,3 +77,21 @@ registerPlugin / updatePlugin / deletePlugin / queryEditablePlugins
 - POST /kapi/oauth2/verifyToken
 - POST /kapi/oauth2/withdrawToken
 - normal 两步(增强开关关闭时):/api/getAppToken.do + /api/login.do
+
+## Web 会话通道(设计器通用表单服务,2026-09-09 实测;BOTP 转换规则等无 OpenAPI 页面的唯一通道)
+
+凭证:`ly auth web-add --user <手机号> --password <密码>`(存 config webUser/webPassword;getPublicKey 的 accessKey 只认手机号形态)。契约全量见 `docs/research-转换规则端点契约调研.md` §8 与 `docs/research/2026-09-09-batchInvokeAction-选中态与过滤契约.md`。
+
+| 端点 | 方法 | 契约要点 |
+|---|---|---|
+| /ierp/auth/queryParameters.do → getPublicKey.do → yzjlogin.do | POST | 登录三步;密码 RSA PKCS#1 v1.5(公钥来自 getPublicKey);错误 `{"errorcode":"login.loginBizException"}` |
+| /ierp/form/getConfig.do | GET | params JSON `{"formId":"<formNumber>","flag":"<rand16>","f":"<rand16>",...extra}` → 响应头 `kd-csrf-token` + 响应体 `pageId`。**extra 键兜底转 setCustomParam**(服务端 createFormShowParameter 对非 bean 属性键逐一 setCustomParam)——传 `SourceBill/TargetBill` 可直开 botp_convertrule 指定规则详情(实证) |
+| /ierp/form/batchInvokeAction.do | POST | body `pageId=&appId=bos&params=[{key,methodName,args,postData}]`;三头 client-start-time/kd-csrf-token/signature,signature=sha256hex(start+token+tail+params[:300])+tail,超 300 字节加 `__length__<n>`。分发按 params[].methodName,`ac` 仅标签 |
+
+已实证动作(ly convert-rule 已封装):
+- `loadData`(key="") → 首屏数据块(dataindex/rows/rowcount);botp_convertpath 全量 1426 条在服务端缓存,首屏 500 = 网格 page size,page-2+ 未破解。
+- `search`(key="searchpath",**args=[["关键词"]] 必须包一层 List**,单串报「功能异常」)→ 服务端对全量缓存做源/目标编码+名称 indexOf 过滤,`u` 动作返回过滤后数据块。→ `ly convert-rule list --search`
+- `itemClick`(key="tbar_main",args=["btnmodify","modify"],postData=[{treeviewap...},[]]) → showForm 新 pageId → botp_convertrule loadData → 规则详情(默认第一行)。→ `ly convert-rule detail`
+- **网格选中态不可 headless 传输**(活体证伪):服务端 doModify 只读 `getEntryCurrentRowIndex("entryentity")`(0 基会话态);`entryRowClick`/`clickCell` 只派发事件不写模型当前行,前端 JS 也从不发 entryRowClick。指定规则一律走 getConfig 自定义参数路线。→ `ly convert-rule detail --source <src> --target <tgt>`
+
+OpenAPI 侧配套:`botp_crlist` 是基础资料实体(T_BOTP_ConvertRule),已发布 query 契约(apiId 2563792031902084096,`--query-id-optional --query-filter-fields`)→ `ly convert-rule get --id <ruleId>`。注意:v2 open query 运行时只对 id 做 WHERE,业务字段过滤参数不生效(实验确认)。

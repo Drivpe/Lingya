@@ -42,11 +42,27 @@ ly data operate --form <表单编码> --operation submit --id <单据id> [--conf
 ly api GET /kapi/v2/open/<表单编码>/query --params '{"id":"1","pageNo":"1","pageSize":"10"}'  # 任意已发布 API 兜底
 ly api POST /kapi/v2/open/<表单编码>/save --data '{"data":{...}}' --confirm   # 原始调用(save 的 body 须包 data 层)
 
+ly convert-rule list                                  # 转换路线列表(会话通道,首屏≤500;需 web 凭证)
+ly convert-rule list --search "pur_order"             # 服务端过滤全量路线(不受首屏限制,2026-09-09 实测)
+ly convert-rule get --id <ruleId>                     # 按 ruleId 读规则整行(OpenAPI 通道 botp_crlist)
+ly convert-rule detail                                # 规则详情(默认第一行路线;解析规则树/字段值)
+ly convert-rule detail --source <源单> --target <目标单>  # 直开指定规则详情(getConfig 自定义参数,2026-09-09 实测)
+                                                      # rules[].rule_id 可直接用于 get --id
+
 ly api GET /kapi/v2/devportal/ai-meta/queryForms --params '{"keyword":"X"}'   # 任意端点兜底
 ly config set write-mode free                       # 关闭写操作门(用户明确要求后才做)
 ```
 
 环境选择:`-e <环境名>`;缺省取 `isDefault`。
+
+## 会话通道(设计器页面)专用说明(2026-09-09 实测)
+
+BOTP 转换规则没有 OpenAPI,ly 走**设计器通用表单服务**(Web 会话通道),需要独立凭证:
+
+1. **先存凭证**:`ly auth web-add --user <手机号> --password <密码>`(存 `~/.kd/config.json` 的 webUser/webPassword;getPublicKey 只认手机号形态账号)。convert-rule list/detail 自动使用。
+2. **list 首屏 500 条上限**是网格 page size(表单元数据配置),不是协议限制;全量检索用 `--search`(服务端对 1426 条缓存做 indexOf 匹配,源/目标编码与名称都会命中子串)。
+3. **指定规则详情**用 `detail --source X --target Y`(getConfig params 里塞自定义参数 SourceBill/TargetBill,服务端 createFormShowParameter 兜底转 setCustomParam);**不要试图传网格选中态**——headless 通道不可传(entryRowClick 不写模型当前行,活体已证伪)。
+4. 契约细节与逆向证据 → `docs/research-转换规则端点契约调研.md` §8 与 `docs/research/2026-09-09-batchInvokeAction-选中态与过滤契约.md`。
 
 ## 业务数据通道配方(2026-09-07 实测)
 

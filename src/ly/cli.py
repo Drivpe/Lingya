@@ -284,15 +284,20 @@ def cmd_convert_rule(args) -> None:
     web_password = getattr(args, "web_password", None)
     if args.cr_cmd == "list":
         try:
-            r = convert.list_paths(env, source=args.source, target=args.target,
-                                   keyword=args.keyword,
-                                   web_user=web_user, web_password=web_password)
+            if getattr(args, "search", None):
+                r = convert.search_paths(env, args.search,
+                                         web_user=web_user, web_password=web_password)
+            else:
+                r = convert.list_paths(env, source=args.source, target=args.target,
+                                       keyword=args.keyword,
+                                       web_user=web_user, web_password=web_password)
         except Exception as e:  # noqa: BLE001 — 呈现为结构化错误信封
             fail("session", "list_failed", str(e)[:300],
                  "web 凭证缺失/错误:ly auth web-add --user <账号> --password <密码>")
-        ok({"total_in_env": r["total_in_env"], "fetched": r["fetched"],
+        ok({"total_in_env": r["total_in_env"], "fetched": r.get("fetched", r["matched"]),
             "matched": r["matched"], "paths": r["paths"]},
-           meta={"hint": "fetched≤500 为会话通道首屏上限;ruleId 获取用 detail 子命令或设计器规则树;"
+           meta={"hint": "fetched≤500 为会话通道首屏上限;--search 走服务端过滤不受首屏限制;"
+                         "ruleId 获取用 detail --source <源单> --target <目标单> 或设计器规则树;"
                          "按 ruleId 读整行: ly convert-rule get --id <ruleId>"})
         return
     if args.cr_cmd == "get":
@@ -300,13 +305,22 @@ def cmd_convert_rule(args) -> None:
         ok(body, meta={"hint": "字段映射/值转换等策略明细: detail 子命令(会话通道)"})
         return
     # detail
+    src, tgt = getattr(args, "source", None), getattr(args, "target", None)
     try:
-        raw_pid = convert.first_path_detail(env, web_user=web_user, web_password=web_password)
+        if src and tgt:
+            d = convert.rule_detail(env, src, tgt,
+                                    web_user=web_user, web_password=web_password)
+        elif src or tgt:
+            fail("args", "source_target_pair_required",
+                 "--source 与 --target 必须成对提供(或都不传=打开第一行)")
+            return
+        else:
+            d = convert.first_path_detail(env, web_user=web_user, web_password=web_password)
     except Exception as e:  # noqa: BLE001
         fail("session", "detail_failed", str(e)[:300],
              "web 凭证缺失/错误:ly auth web-add --user <账号> --password <密码>")
-    ok(raw_pid, meta={"hint": "detail 当前固定打开路线列表第一行(网格选中态传输格式待破解,见 issue #13);"
-                             "rules[].rule_id 可直接用于 ly convert-rule get --id"})
+    ok(d, meta={"hint": "rules[].rule_id 可直接用于 ly convert-rule get --id;"
+                        "指定规则: detail --source <源单> --target <目标单>(getConfig 自定义参数直开)"})
 
 
 # ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
@@ -520,10 +534,11 @@ def build_parser() -> argparse.ArgumentParser:
     cr_p = sub.add_parser("convert-rule",
                           help="单据转换(BOTP)规则只读通道:list(路线)/get(按ruleId)/detail(详情)")
     cr_sub = cr_p.add_subparsers(dest="cr_cmd", required=True)
-    crls_p = cr_sub.add_parser("list", help="列环境内转换路线(会话通道;源单/目标单/关键词客户端过滤)")
+    crls_p = cr_sub.add_parser("list", help="列环境内转换路线(会话通道;--search 服务端过滤全量,--source/--target/--keyword 客户端过滤首屏)")
     crls_p.add_argument("--source", help="源单编码精确过滤,如 ly_test_bill_a1")
     crls_p.add_argument("--target", help="目标单编码精确过滤")
     crls_p.add_argument("--keyword", help="关键词子串过滤(匹配源/目标编码与名称)")
+    crls_p.add_argument("--search", help="服务端过滤关键词(作用于全量路线缓存,不受首屏 500 限制)")
     crls_p.add_argument("--web-user", default=None, help="临时 web 账号(默认读环境配置 webUser/loginUser)")
     crls_p.add_argument("--web-password", default=None, help="临时 web 密码(默认读环境配置 webPassword)")
     common(crls_p)
@@ -532,7 +547,9 @@ def build_parser() -> argparse.ArgumentParser:
     crget_p.add_argument("--id", required=True, help="ruleId(rows[].id,数字主键)")
     common(crget_p)
     crget_p.set_defaults(func=cmd_convert_rule)
-    crd_p = cr_sub.add_parser("detail", help="会话通道打开规则详情(当前固定第一行),解析规则树/字段值/映射网格")
+    crd_p = cr_sub.add_parser("detail", help="会话通道打开规则详情(--source/--target 直开指定规则;否则第一行),解析规则树/字段值/映射网格")
+    crd_p.add_argument("--source", help="源单编码,如 pur_order(与 --target 成对)")
+    crd_p.add_argument("--target", help="目标单编码,如 pur_instock(与 --source 成对)")
     crd_p.add_argument("--web-user", default=None)
     crd_p.add_argument("--web-password", default=None)
     common(crd_p)

@@ -149,12 +149,20 @@ class WebSession:
             self.login()
 
     # ── 通用表单服务(§8.1) ──
-    def open_form(self, form_number: str) -> str:
-        """getConfig 建立表单页面会话;返回服务端下发的 pageId。"""
+    def open_form(self, form_number: str, extra_params: dict | None = None) -> str:
+        """getConfig 建立表单页面会话;返回服务端下发的 pageId。
+
+        extra_params:params JSON 里的额外键。服务端 FormShowParameter
+        .createFormShowParameter 会把所有非 bean 属性的剩余键逐一
+        setCustomParam(k,v)——借此给表单传自定义参数(如 botp_convertrule
+        的 SourceBill/TargetBill,活体实证 2026-09-09)。
+        """
         self.ensure_login()
-        params = json.dumps({"formId": form_number, "flag": _rand(), "f": _rand()},
-                            ensure_ascii=False)
-        qs = urllib.parse.urlencode({"params": params, "random": random.random()})
+        params = {"formId": form_number, "flag": _rand(), "f": _rand()}
+        if extra_params:
+            params.update(extra_params)
+        qs = urllib.parse.urlencode({"params": json.dumps(params, ensure_ascii=False),
+                                     "random": random.random()})
         cfg = json.loads(self._get("form/getConfig.do", qs))
         page_id = cfg.get("pageId") or ""
         if not page_id:
