@@ -348,11 +348,11 @@ GET form/getConfig.do?params={"formId":"botp_convertrule","flag":"<rand16>","f":
 
 ```json
 [{"key": "tbar_main", "methodName": "itemClick", "args": ["btnsave", ""],
-  "postData": [{}, [{"k": "<字段key>", "v": <新值>}, ...], []]}]
+  "postData": [{}, [{"k": "<字段key>", "v": <新值>}, ...], {}]}]
 ```
 
 - `args` 第二元素**必须存在**:`["btnsave"]`(缺参会「功能异常」)、`["btnsave","save"]`(报「实体botp_convertrule上没有编码为save的操作」)都不行——**空串**让框架跳过实体操作分发、直接进插件 `ConvertRuleEdit.itemClick` → `doModify()` → `doSaveAll()`。
-- `postData[0]`=控件状态回显(空对象可)、`postData[1]`=**字段回写列表**、`postData[2]` 留空。字段条目格式 `{"k":字段key,"v":值}`(可选 `"r"` 行号)——出自 `FormController.postData/postFieldState` 字节码:`k`→字段、`r`→行、`v`→经 `FieldEdit.postBack` 写模型。
+- `postData[0]`=控件状态回显(空对象可)、`postData[1]`=**字段回写列表**、`postData[2]`=**子表单状态,必须是 Map(`{}`)**——⚠️ 本文初稿把第三段误记为"留空 `[]`",实测 `[]` 在框架 `FormController.postData`(bos-form-mvc,签名 `postData(List)`,get(2)→checkcast Map)抛 `ClassCastException: ArrayList cannot be cast to Map`,服务端日志 errTitle 可定位;字节码定形:get(0)→postControlState(Map)、get(1)→postFieldState(List)、get(2)→postChildFormSate(Map)。字段条目格式 `{"k":字段key,"v":值}`(可选 `"r"` 行号)——出自 `FormController.postData/postFieldState` 字节码:`k`→字段、`r`→行、`v`→经 `FieldEdit.postBack` 写模型。
 - 无改动保存返回 `ShowNotificationMsg "保存成功。"` + 规则树 updateNodes。
 
 ### 11.2 字段锁:kingdee 发布的规则被设计器锁定(⚠️ 内容写入的边界)
@@ -380,3 +380,32 @@ ly convert-rule disable --id <ruleId> --confirm   # 非幂等:重复同向报 60
 
 - `er_hotelbill`(em 应用,kingdee)无 push 操作;`ai-meta addOperation` 挂 push 报「表单不属于当前开发商,请扩展后再进行编辑」(对 `er_hotelbill_ext` 同样被拒——扩展表单属主仍是 kingdee)。`OperationApi`/`DefaultOperate` 字节码证实 v2 open 运行时是**通用实体操作执行器**,没有内置 push——实体上必须先有 push 操作。
 - 解锁选项:① 管理员侧给开发商 e8n4 放开 em 资源权限或手工建扩展应用(同 BOM 案例);② 走会话通道(admin 会话)在设计器加 push 操作(载荷待逆向);③ C3 完整落地后,在**自属应用**的单据间建规则+挂 push,端到端验收同样成立(spec 的「标准单→标准单」本就非硬性)。
+
+---
+
+## 12. C3 落地 + C4 端到端下推闭环(2026-09-09 深夜,路线③ 实测收官)
+
+### 12.1 ADDNEW 试金石(✅ 一次打通)
+
+- `getConfig params={"formId":"botp_convertrule","Status":"ADDNEW","SourceBill":src,"TargetBill":tgt}` + loadData:
+  `fsourcebill/ftargetbill` 预填,**`isv_tag=e8n4`**(规则归会话身份的开发商,无 st 锁);fid 预分配并**随即落库骨架行**(fdata=默认 XML,`fcreatedate`≈loadData 时刻)——**「新建」语义=开页即建行,后续 btnsave 只改内容**。
+- 路线已有规则时,ADDNEW 复用既有行(同 id),不会建第二条;字段映射网格初始为空。
+
+### 12.2 btnsave 载荷修正(⚠️ §11.1 初稿笔误)
+
+第三段必须 `{}`(Map)不是 `[]`:框架 `FormController.postData`(bos-form-mvc-8.0.jar,签名 `postData(List<Map>)`,get(0)→postControlState(Map)/get(1)→postFieldState(List)/get(2)→postChildFormSate(Map));`[]` 反序列化成 ArrayList → `ClassCastException: ArrayList cannot be cast to Map`(§11.1 已改)。服务端日志定位:`FormBehaviorErrorReporter ... errTitle`,并回显完整 params。
+
+### 12.3 C4 闭环记录(全部实测,ly_botp_a→ly_botp_b)
+
+1. `build-meta` 建 A/B 骨架单(应用 e8n4_casetest);A 补 save+pushandsave、B 补 save(ai-meta addOperation;骨架单出厂无操作)。
+2. `ly convert-rule new --source ly_botp_a --target ly_botp_b --name "A到B实验规则" --confirm` → ruleId `2564978271443758080`,OpenAPI get 读回 name ✓。
+3. `ly convert-rule enable --id ... --confirm`(停用状态 pushandsave 报 603「无匹配规则」)。
+4. `ly data publish --form ly_botp_a --operations save,pushandsave --confirm`、`--form ly_botp_b --operations save,query --confirm`。
+5. `ly data save --form ly_botp_a --data '{"qty":"5"}' --confirm` → A 单 id;`ly data operate --operation pushandsave --id <A单id> --confirm` → successCount=1;物理表 `tk_ly_botp_b` 出现新行,**API query 读回 ✓**。
+6. 行为:重复 pushandsave 每次生成一条新 B 单(非幂等);骨架规则无字段映射行,qty 不携带(fieldmappolicy 增删改是独立缺口)。
+7. 错误链:`无匹配规则`=规则停用;`下推成功,但保存失败: 下游单据没有配置保存操作`=目标单缺 save 操作——两条都有明确语义,可直接判因。
+
+### 12.4 遗产与缺口
+
+- `ly convert-rule new/save` 已入 CLI(双命令,走写操作门);`pushandsave` 参数 schema 经 `getOperationTypeSchema`(POST,需 formNumber)查得:targetBill+ruleId(@all=全部规则)。
+- 未做:fieldmappolicy 行级写(网格行回写)、同路线多规则定位(route_ambiguity 已防护)、pushandsave 的 ruleId=@all 实测。

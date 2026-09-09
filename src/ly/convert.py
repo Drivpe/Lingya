@@ -128,6 +128,56 @@ _LOAD_DATA = [{"key": "", "methodName": "loadData", "args": [], "postData": []}]
 _MODIFY_POST = [{"treeviewap": {"focus": {"id": "0", "parentid": "", "text": "业务云",
                                           "isParent": True}}}, []]
 
+# btnsave 写通道契约(2026-09-09 活体破解,§11.1 + ClassCast 修正):
+# postData 三段 [控件状态Map, 字段回写List, 子表单状态Map] —— 第三段必须是
+# Map({}),给 [] 会 ArrayList→Map ClassCastException(框架 FormController.postData)。
+_BTN_SAVE = "btnsave"
+
+
+def _field_entries(fields: dict) -> list:
+    """{"k":v} → [{"k":k,"v":v}];fname 与 fmulilangname 成对写(多语言代理)。"""
+    entries = []
+    for k, v in fields.items():
+        entries.append({"k": k, "v": v})
+    if "fname" in fields and "fmulilangname" not in fields:
+        entries.append({"k": "fmulilangname", "v": {"zh_CN": fields["fname"]}})
+    return entries
+
+
+def _open_rule_page(s, source: str, target: str, status: str | None = None) -> str:
+    extra = {"SourceBill": source, "TargetBill": target}
+    if status:
+        extra["Status"] = status
+    return s.open_form(RULE_EDIT_FORM, extra_params=extra)
+
+
+def _load_and_parse(s, page_id: str) -> dict:
+    t3 = s.raw_invoke(RULE_EDIT_FORM, "loadData", page_id, _LOAD_DATA)
+    return parse_detail(t3)
+
+
+def _btnsave(s, page_id: str, entries: list) -> dict:
+    """btnsave 写入并解析响应。成功标志=updateNodes 动作且无错误对话框。"""
+    params = [{"key": "tbar_main", "methodName": "itemClick",
+               "args": [_BTN_SAVE, ""], "postData": [{}, entries, {}]}]
+    acts = s.invoke(RULE_EDIT_FORM, "itemClick", page_id, params)
+    msgs: list = []
+    dialog = None
+    updated = False
+    for a in acts:
+        if not isinstance(a, dict):
+            continue
+        p = a.get("p")
+        if isinstance(p, list):
+            for c in p:
+                if isinstance(c, dict) and c.get("methodname") == "updateNodes":
+                    updated = True
+                if isinstance(c, dict) and c.get("methodname") == "ShowNotificationMsg":
+                    msgs.extend(str(x) for x in (c.get("args") or []))
+        if isinstance(p, dict) and p.get("caption"):
+            dialog = p["caption"]
+    return {"saved": bool(updated and not dialog), "messages": msgs, "dialog": dialog}
+
 
 def _rows_from_data(data: dict) -> list:
     """数据块 → 路线路字典列表(seq/源/目标编码+名称)。"""
@@ -182,11 +232,8 @@ def rule_detail(env: dict, source: str, target: str,
     无需网格选中(网格选中态在无头通道不可传,entryRowClick 不写模型当前行)。
     """
     s = _session(env, web_user, web_password)
-    pid = s.open_form(RULE_EDIT_FORM,
-                      extra_params={"SourceBill": source, "TargetBill": target})
-    t3 = s.raw_invoke(RULE_EDIT_FORM, "loadData", pid,
-                      _LOAD_DATA)
-    out = parse_detail(t3)
+    pid = _open_rule_page(s, source, target, None)
+    out = _load_and_parse(s, pid)
     out["source"] = source
     out["target"] = target
     return out
@@ -239,3 +286,76 @@ def parse_detail(raw: str) -> dict:
                 out["grids"].setdefault(c["key"], []).extend(
                     rows if isinstance(rows, list) else [rows])
     return out
+
+
+# ── new/save:规则写入(会话通道,C3/#15,2026-09-09 活体闭环) ───────────────────
+def new_rule(env: dict, source: str, target: str, name: str,
+             fields: dict | None = None,
+             web_user: str | None = None,
+             web_password: str | None = None) -> dict:
+    """新建(或打开路线既有骨架行)转换规则并保存名称/字段值。
+
+    实测语义(2026-09-09):Status=ADDNEW + SourceBill/TargetBill 直开;
+    **loadData 时服务端即落库骨架行**(fid 预分配,fdata=默认 XML)——
+    路线已有规则时复用该行(同 id),不会建第二条。名称写 fname+
+    fmulilangname(多语言代理,成对写)。返回含 rule_id 与 OpenAPI 读回值。
+    """
+    from .envelope import fail
+    s = _session(env, web_user, web_password)
+    pid = _open_rule_page(s, source, target, "ADDNEW")
+    d = _load_and_parse(s, pid)
+    rid = (d["rules"] or [{}])[0].get("rule_id")
+    if not rid:
+        fail("session", "no_rule_allocated", "ADDNEW 页未预分配 rule_id",
+             "确认源/目标单编码存在;详情见 docs/research/2026-09-09-batchInvokeAction §10.2")
+    f = dict(fields or {})
+    f.setdefault("fname", name)
+    res = _btnsave(s, pid, _field_entries(f))
+    if not res["saved"]:
+        fail("session", "save_rejected",
+             f"btnsave 被拒: {res['dialog'] or res['messages']}",
+             "kingdee 发布的规则字段被 st 锁定(§11.2);自有规则可编辑;"
+             "载荷第三段必须是 {} 不是 [](FormController.postData ClassCast)")
+    row = get_rule(env, rid)
+    return {"rule_id": str(rid), "source": source, "target": target,
+            "name": name, "readback": {"name": row.get("name"),
+                                       "enabled": row.get("enabled"),
+                                       "bizappid": row.get("bizappid_number")},
+            "saved": True}
+
+
+def save_rule(env: dict, rule_id: str, fields: dict,
+              web_user: str | None = None,
+              web_password: str | None = None) -> dict:
+    """按 ruleId 编辑既有规则:开路线页→校验当前行匹配→回写字段→btnsave→读回。
+
+    限制:规则定位经 SourceBill/TargetBill(该路线首条规则)——同路线多条
+    规则时当前行可能不是目标行,不匹配即报 route_ambiguity(不盲写)。
+    kingdee 发布的原始规则字段被 st 锁死(§11.2),只有自有规则可写。
+    """
+    from .envelope import fail
+    row = get_rule(env, rule_id)
+    src = row.get("sourceentitynumber_number") or row.get("sourceentitynumber_id")
+    tgt = row.get("targetentitynumber_number") or row.get("targetentitynumber_id")
+    if not src or not tgt:
+        fail("api", "missing_route", f"ruleId={rule_id} 行缺少源/目标实体编码",
+             "ly convert-rule get --id 检查 sourceentitynumber_number/targetentitynumber_number")
+    s = _session(env, web_user, web_password)
+    pid = _open_rule_page(s, src, tgt, None)
+    d = _load_and_parse(s, pid)
+    opened = (d["rules"] or [{}])[0].get("rule_id")
+    if not opened or str(opened) != str(rule_id):
+        fail("session", "route_ambiguity",
+             f"路线 {src}→{tgt} 当前打开的规则是 {opened},不是目标 {rule_id}",
+             "同路线多条规则的场景尚未支持(网格选中态不可 headless 传输,§10.1);"
+             "暂用设计器或先停用其他规则")
+    res = _btnsave(s, pid, _field_entries(fields))
+    if not res["saved"]:
+        fail("session", "save_rejected",
+             f"btnsave 被拒: {res['dialog'] or res['messages']}",
+             "kingdee 规则字段被 st 锁死须先「扩展」分支(§11.2);自有规则可直接编辑")
+    row2 = get_rule(env, rule_id)
+    return {"rule_id": str(rule_id),
+            "readback": {"name": row2.get("name"), "enabled": row2.get("enabled"),
+                         "modifydate": row2.get("modifydate")},
+            "saved": True, "messages": res["messages"]}

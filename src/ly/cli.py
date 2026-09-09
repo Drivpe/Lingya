@@ -333,6 +333,39 @@ def cmd_convert_rule(args) -> None:
         ok(r, meta={"hint": "enabled 字段是操作后 query 读回值,可直接断言;"
                             "重复同向操作会报状态前置错误(非幂等)"})
         return
+    if args.cr_cmd == "new":
+        fields = json.loads(args.set) if args.set else {}
+        write_gate(env, "POST", f"session:{convert.RULE_EDIT_FORM}#ADDNEW/btnsave",
+                   {"source": args.source, "target": args.target,
+                    "name": args.name, "extra_fields": fields},
+                   confirm=args.confirm, dry_run=args.dry_run)
+        try:
+            r = convert.new_rule(env, args.source, args.target, args.name,
+                                 fields, web_user=web_user, web_password=web_password)
+        except Exception as e:  # noqa: BLE001
+            fail("session", "new_failed", str(e)[:300],
+                 "web 凭证: ly auth web-add --user <账号> --password <密码>;"
+                 "契约: docs/research/2026-09-09-batchInvokeAction-选中态与过滤契约.md §11")
+        ok(r, meta={"hint": "ADDNEW 页 loadData 即落库骨架行;路线已有规则时复用该行(同 id);"
+                            "name 读回值可断言"})
+        return
+    if args.cr_cmd == "save":
+        fields = json.loads(args.set) if args.set else {}
+        if not fields:
+            fail("args", "fields_required",
+                 "--set 必须给至少一个字段,如 --set '{\"fname\":\"新名\"}'",
+                 "多语言字段直接给 {\"zh_CN\": ..} 形态;fname 会自动带上 fmulilangname")
+        write_gate(env, "POST", f"session:{convert.RULE_EDIT_FORM}#EDIT/btnsave",
+                   {"id": str(args.id), "fields": fields},
+                   confirm=args.confirm, dry_run=args.dry_run)
+        try:
+            r = convert.save_rule(env, args.id, fields,
+                                  web_user=web_user, web_password=web_password)
+        except Exception as e:  # noqa: BLE001
+            fail("session", "save_failed", str(e)[:300],
+                 "kingdee 规则字段被 st 锁死须先「扩展」分支(§11.2);自有规则可直接编辑")
+        ok(r, meta={"hint": "readback 是保存后 OpenAPI get 读回的目标字段值"})
+        return
     # detail
     src, tgt = getattr(args, "source", None), getattr(args, "target", None)
     try:
@@ -563,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     op_p.set_defaults(func=cmd_data)
 
     cr_p = sub.add_parser("convert-rule",
-                          help="单据转换(BOTP)规则只读通道:list(路线)/get(按ruleId)/detail(详情)")
+                          help="单据转换(BOTP)规则通道:list/get/detail 只读 + new/save 写入 + enable/disable 启停")
     cr_sub = cr_p.add_subparsers(dest="cr_cmd", required=True)
     crls_p = cr_sub.add_parser("list", help="列环境内转换路线(会话通道;--search 服务端过滤全量,--source/--target/--keyword 客户端过滤首屏)")
     crls_p.add_argument("--source", help="源单编码精确过滤,如 ly_test_bill_a1")
@@ -593,6 +626,26 @@ def build_parser() -> argparse.ArgumentParser:
     crd_p.add_argument("--web-password", default=None)
     common(crd_p)
     crd_p.set_defaults(func=cmd_convert_rule)
+    crn_p = cr_sub.add_parser("new", help="新建转换规则(会话通道 ADDNEW+btnsave;路线已有规则时复用该行;走写操作门)")
+    crn_p.add_argument("--source", required=True, help="源单编码,如 ly_botp_a")
+    crn_p.add_argument("--target", required=True, help="目标单编码,如 ly_botp_b")
+    crn_p.add_argument("--name", required=True, help="规则名称(写 fname+fmulilangname)")
+    crn_p.add_argument("--set", default=None, help='额外字段值 JSON,如 \'{"fdescription":"x"}\'')
+    crn_p.add_argument("--web-user", default=None)
+    crn_p.add_argument("--web-password", default=None)
+    crn_p.add_argument("--confirm", action="store_true", help="write-mode=confirm 时,真执行必须携带")
+    crn_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(crn_p)
+    crn_p.set_defaults(func=cmd_convert_rule)
+    crs_p = cr_sub.add_parser("save", help="按 ruleId 编辑既有规则字段(会话通道 EDIT+btnsave;走写操作门;kingdee 规则字段被锁不可写)")
+    crs_p.add_argument("--id", required=True, help="ruleId")
+    crs_p.add_argument("--set", required=True, help='字段值 JSON,如 \'{"fname":"新名"}\'')
+    crs_p.add_argument("--web-user", default=None)
+    crs_p.add_argument("--web-password", default=None)
+    crs_p.add_argument("--confirm", action="store_true")
+    crs_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+    common(crs_p)
+    crs_p.set_defaults(func=cmd_convert_rule)
 
     doc_p = sub.add_parser("doctor", help="环境体检:配置→连通→认证")
     common(doc_p)

@@ -1,6 +1,6 @@
 [project]
 name = "ly-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lingya — 个人跨 harness 金蝶 ERP 开发 CLI(苍穹/星空 OpenAPI)"
 readme = "README.md"
 requires-python = ">=3.10"

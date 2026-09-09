@@ -51,6 +51,9 @@ ly convert-rule detail --source <源单> --target <目标单>  # 直开指定规
 ly convert-rule enable --id <ruleId> --confirm        # 启用规则(OpenAPI;先 ly data publish --form botp_crlist --operations enable,disable --confirm)
 ly convert-rule disable --id <ruleId> --confirm       # 停用规则(非幂等:重复同向报 603)
 
+ly convert-rule new --source <源单> --target <目标单> --name <名称> [--set '{"k":"v"}'] --confirm   # 新建规则(ADDNEW+btnsave;路线已有规则时复用该行同 id;2026-09-09 实测)
+ly convert-rule save --id <ruleId> --set '{"fname":"新名"}' --confirm   # 编辑既有规则字段(kingdee 规则被 st 锁不可写;同路线多规则时可能报 route_ambiguity)
+
 ly api GET /kapi/v2/devportal/ai-meta/queryForms --params '{"keyword":"X"}'   # 任意端点兜底
 ly config set write-mode free                       # 关闭写操作门(用户明确要求后才做)
 ```
@@ -65,7 +68,7 @@ BOTP 转换规则没有 OpenAPI,ly 走**设计器通用表单服务**(Web 会话
 2. **list 首屏 500 条上限**是网格 page size(表单元数据配置),不是协议限制;全量检索用 `--search`(服务端对 1426 条缓存做 indexOf 匹配,源/目标编码与名称都会命中子串)。
 3. **指定规则详情**用 `detail --source X --target Y`(getConfig params 里塞自定义参数 SourceBill/TargetBill,服务端 createFormShowParameter 兜底转 setCustomParam);**不要试图传网格选中态**——headless 通道不可传(entryRowClick 不写模型当前行,活体已证伪)。
 4. **规则启停**用 `enable/disable --id`(OpenAPI 通道,不受设计器「其他开发商发布」锁定影响;重复同向操作报 603 状态前置错)。
-5. **规则内容写入**(会话通道 `btnsave`,2026-09-09 破解):`itemClick args=["btnsave",""]`(第二参空串必须存在)+ `postData=[{},[{"k":字段,"v":值}...],[]]`。但 kingdee 发布的原始规则字段被 `st` 状态锁死(「本规则由其他开发商发布,请勿直接改动;可以扩展一个新分支后修改」)——改 kingdee 规则必须先在设计器「扩展」新分支;本开发商自有规则可直接编辑。
+5. **规则内容写入**(会话通道 `btnsave`,2026-09-09 破解并已落 CLI `convert-rule new/save`):`itemClick args=["btnsave",""]`(第二参空串必须存在)+ `postData=[{控件状态Map},[{"k":字段,"v":值}...],{子表单状态Map}]`——**三段必须是 [Map,List,Map],第三段给 `[]` 会 ArrayList→Map ClassCastException**(框架 FormController.postData,已实测踩坑)。kingdee 发布的原始规则字段被 `st` 状态锁死(「本规则由其他开发商发布,请勿直接改动;可以扩展一个新分支后修改」)——改 kingdee 规则必须先在设计器「扩展」新分支;本开发商自有规则可直接编辑。
 6. 契约细节与逆向证据 → `docs/research-转换规则端点契约调研.md` §8 与 `docs/research/2026-09-09-batchInvokeAction-选中态与过滤契约.md`(§10 活体验证、§11 保存通道)。
 
 ## 业务数据通道配方(2026-09-07 实测)
@@ -77,6 +80,21 @@ BOTP 转换规则没有 OpenAPI,ly 走**设计器通用表单服务**(Web 会话
 3. **发布与调用**:`ly data publish --form X --operations save,query,submit,audit --confirm` → 每个操作得到一个 `apiId` + `urlformat /v2/open/<form>/<op>`;调用路径 = `/kapi/v2` + urlformat。**query 必带 `id` + `pageNo`/`pageSize`**(发布契约按 id 精确查);**save 的 body 必须包 `data` 层**(`{"data":{...业务字段}}`),`ly data save` 已自动包裹;候选键语义:传 id=更新(返回 type=Update),不传=新增;**未知字段会被服务端静默忽略**(不报错),字段名必须与实体属性精确一致;类型不匹配会返回结构化 error。
    - **两个已证实的坑(2026-09-09)**:① `--query-filter-fields` 发布的过滤参数**运行时不生效**(v2 open query 运行时只对 id 做 WHERE,实测确认)——要按业务字段过滤只能拉全量后客户端筛;② genV2ApiByMetaData 是整体替换语义,重发 publish 对 **save 等写操作会把 respentryentity 置空**——若该 urlformat 曾手工配置过返回参数会被清掉(ly 自家 query 的 resp 由 save_entries 重生成,不受此害),重发前先备份契约。
 4. **生命周期与状态读回**:`ly data operate --operation submit|audit|unaudit|unsubmit|delete --id <id> --confirm`。操作 API 对状态迁移**宽松幂等**(重复同向操作也报成功);**状态读回用对向操作探针**:unaudit 成功即证处于已审核态、unsubmit 成功即证处于已提交态。id 不存在返回结构化 error(`未查找到需要xx的数据`)。注意:骨架单实体**没有 billno/billstatus 系统字段**(禁止 modify-meta 手工创建,buildMeta artifact 也不带),生命周期状态只存在于操作层,query 读不回状态字段——buildMeta 建单时若需完整单据语义,优先考虑在需求产物中声明(或接受操作探针方案)。
+
+## C4 端到端下推配方(2026-09-09 深夜全链路实测)
+
+自建单据 A 下推生成 B 的完整闭环,按序:
+
+1. **建单**:`ly meta build-meta` 建 A、B 两个骨架单(实体 `tableName=tk_{entityKey}`,字段带 `columnName=fk_{isv}_{业务词}`,见上文配方)。
+2. **建规则**:`ly convert-rule new --source A --target B --name <名> --confirm`——ADDNEW 页 **loadData 即落库骨架行**(fid 预分配,`isv_tag` 取会话身份),同路线已有规则时复用同 id。
+3. **启用**:`ly convert-rule enable --id <ruleId> --confirm`(停用状态会报「无匹配规则」)。
+4. **挂操作**:A 挂 `pushandsave`(后台自动整单下推并保存,entityOperation)与 `save`;B 挂 `save`——**下游单据没配保存操作会报「下推成功,但保存失败: 下游单据没有配置保存操作」**:
+   `ly api POST /kapi/v2/devportal/ai-meta/operation/addOperation --data '{"formNumber":"<表单>","operationType":"pushandsave","operationKey":"pushandsave","operationName":"后台下推","parameter":{"targetBill":"<B编码>","ruleId":"<ruleId>"}}' --confirm`(pushandsave 参数 schema 经 getOperationTypeSchema 查得;save 同理 operationType=save)
+5. **发布**:`ly data publish --form A --operations save,pushandsave --confirm`;`ly data publish --form B --operations save,query --confirm`。
+6. **造源单**:`ly data save --form A --data '{"qty":"5"}' --confirm` → 得 A 单 id。
+7. **下推**:`ly data operate --form A --operation pushandsave --id <A单id> --confirm`。
+8. **断言**:`ly data query --form B --id <?>`——B 单 id 不在响应里,经物理表 `tk_ly_botp_b` 查 fid(本地环境可直连 PostgreSQL)或看 B 列表页。**骨架规则无字段映射行,qty 不会带过去**(字段映射增删改是独立缺口)。
+9. 行为记录:重复下推**非幂等**,每次生成一条新 B 单。
 
 ## 元数据层验证配方(建→改→读回断言,2026-09-07 实测)
 
