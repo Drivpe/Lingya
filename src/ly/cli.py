@@ -313,7 +313,7 @@ def cmd_convert_rule(args) -> None:
         except Exception as e:  # noqa: BLE001
             fail("api", "operate_failed", str(e)[:300],
                  "先发布:ly data publish --form botp_crlist --operations enable,disable --confirm")
-        ok(r, meta={"hint": "读回断言:ly convert-rule get --id <ruleId> 看 enabled 字段;"
+        ok(r, meta={"hint": "enabled 字段是操作后 query 读回值,可直接断言;"
                             "重复同向操作会报状态前置错误(非幂等)"})
         return
     # detail

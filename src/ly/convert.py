@@ -23,6 +23,7 @@ from .session import SessionError, WebSession
 
 PATH_FORM = "botp_convertpath"   # 转换路线列表(DynamicFormModel,仅会话通道)
 RULE_FORM = "botp_crlist"        # 转换规则(基础资料,物理表 T_BOTP_ConvertRule,OpenAPI 可查)
+RULE_EDIT_FORM = "botp_convertrule"  # 规则详情页表单(会话通道打开/保存)
 QUERY_PATH = f"/kapi/v2/open/{RULE_FORM}/query"
 
 
@@ -95,12 +96,13 @@ def get_rule(env: dict, rule_id: str) -> dict:
 
 # ── enable/disable:规则启停(OpenAPI 通道,2026-09-09 实测闭环) ────────────────
 def set_rule_enabled(env: dict, rule_id: str, enable: bool) -> dict:
-    """启用/停用转换规则。前提:ly data publish --form botp_crlist
-    --operations enable,disable --confirm(先发布一次)。
+    """启用/停用转换规则,并 query 读回断言。前提:ly data publish
+    --form botp_crlist --operations enable,disable --confirm(先发布一次)。
 
     实测语义:对已停用规则再 disable 报 603「数据已为停用状态」(状态前置校验,
-    非幂等);启用成功后 query 读回 enabled=1。写入走 T_BOTP_ConvertRule 物理表,
-    不受设计器「其他开发商发布」锁定影响(锁定只作用于设计器 UI 的字段回写)。
+    非幂等);写入走 T_BOTP_ConvertRule 物理表,不受设计器「其他开发商发布」
+    锁定影响(锁定只作用于设计器 UI 的字段回写)。
+    返回含 `enabled`(操作后 query 读回值,0/1)供调用方断言。
     """
     op = "enable" if enable else "disable"
     body = ly_api.call(env, "POST", f"/kapi/v2/open/{RULE_FORM}/{op}",
@@ -114,30 +116,17 @@ def set_rule_enabled(env: dict, rule_id: str, enable: bool) -> dict:
     d = body.get("data") or {}
     result = d.get("result") or []
     errs = [e for r in result for e in (r.get("errors") or [])]
+    row = get_rule(env, rule_id)
     return {"operation": op, "id": str(rule_id),
             "successCount": d.get("successCount"), "totalCount": d.get("totalCount"),
-            "failCount": d.get("failCount"), "result": result, "errors": errs}
+            "failCount": d.get("failCount"), "errors": errs,
+            "enabled": row.get("enabled")}
 
 
 # ── detail:规则详情解析(会话通道) ──────────────────────────────────────────
 _LOAD_DATA = [{"key": "", "methodName": "loadData", "args": [], "postData": []}]
 _MODIFY_POST = [{"treeviewap": {"focus": {"id": "0", "parentid": "", "text": "业务云",
                                           "isParent": True}}}, []]
-
-
-def _parse_grid_data(acts: list) -> dict | None:
-    """从动作流取 entryentity 数据块(dataindex+rows+rowcount);无则 None。"""
-    for a in acts:
-        if not (isinstance(a, dict) and isinstance(a.get("p"), list)):
-            continue
-        for c in a["p"]:
-            if isinstance(c, dict) and c.get("methodname") in ("setRows", "addRows",
-                                                               "insertRows"):
-                pass  # 网格重绘走这里,但列表数据块在 'u' 动作
-        p0 = a["p"][0] if a["p"] else None
-        if isinstance(p0, dict) and "data" in p0:
-            return p0["data"]
-    return None
 
 
 def _rows_from_data(data: dict) -> list:
@@ -193,9 +182,9 @@ def rule_detail(env: dict, source: str, target: str,
     无需网格选中(网格选中态在无头通道不可传,entryRowClick 不写模型当前行)。
     """
     s = _session(env, web_user, web_password)
-    pid = s.open_form(RULE_FORM.replace("crlist", "convertrule"),
+    pid = s.open_form(RULE_EDIT_FORM,
                       extra_params={"SourceBill": source, "TargetBill": target})
-    t3 = s.raw_invoke(RULE_FORM.replace("crlist", "convertrule"), "loadData", pid,
+    t3 = s.raw_invoke(RULE_EDIT_FORM, "loadData", pid,
                       _LOAD_DATA)
     out = parse_detail(t3)
     out["source"] = source
@@ -218,7 +207,7 @@ def first_path_detail(env: dict, web_user: str | None = None,
     if not show:
         raise SessionError(f"modify 未返回 showForm: {t2[:200]}")
     pid2 = show["p"][0]["pageId"]
-    t3 = s.raw_invoke(RULE_FORM.replace("crlist", "convertrule"), "loadData", pid2,
+    t3 = s.raw_invoke(RULE_EDIT_FORM, "loadData", pid2,
                       _LOAD_DATA)
     return parse_detail(t3)
 
