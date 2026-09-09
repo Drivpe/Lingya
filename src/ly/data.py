@@ -373,7 +373,8 @@ def fetch_metadata(env: dict, entity_number: str) -> dict:
 
 def gen_api(env: dict, bizobject: str, appid: str, name_prefix: str,
             operation: str, metadata: dict, status: str = "C",
-            took: list | None = None, query_id_optional: bool = False
+            took: list | None = None, query_id_optional: bool = False,
+            query_filter_fields: tuple[str, ...] = ()
             ) -> tuple[str | None, str | None, dict | None]:
     """构造并提交单个操作 API;返回 (api_id, error, urlformat)。"""
     op_cn = OPERATION_CN.get(operation, operation)
@@ -398,7 +399,24 @@ def gen_api(env: dict, bizobject: str, appid: str, name_prefix: str,
         body["data"]["filter_entity"] = []
     elif operation == "query":
         # id 必填=按 id 查单条(默认);id 可选=同契约可分页列全量(C 线 convert-rule list 依赖)
-        body["data"]["bodyentryentity"] = [_id_row(must="0" if query_id_optional else "1")]
+        request_rows = [_id_row(must="0" if query_id_optional else "1")]
+        if query_filter_fields:
+            # 追加可选业务过滤参数(从元数据头部字段裁剪;BasedataProp 自动拆 _number/_id)
+            keep = set(query_filter_fields)
+            bill = metadata.get("BillEntity", {})
+            trimmed = {"BillEntity": {
+                "fields": [f for f in bill.get("fields", []) if f.get("name") in keep],
+                "entries": [],
+            }}
+            missing = keep - {f.get("name") for f in trimmed["BillEntity"]["fields"]}
+            if missing:
+                raise PayloadInvariantError(f"query-filter-fields 元数据缺字段: {sorted(missing)}")
+            request_rows.extend(row for row in build_save_body_entries(trimmed)
+                                if row.get("paramname") != "id")
+            for row in request_rows:
+                if row.get("paramname") != "id":
+                    row["must"] = "0"
+        body["data"]["bodyentryentity"] = request_rows
         body["data"]["respentryentity"] = resp_from_body(save_entries)
         body["data"]["filter_entity"] = json.loads(json.dumps(ID_FILTER))
     else:

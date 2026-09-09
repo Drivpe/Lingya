@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 
 from . import __version__, api, auth, config, convert, data, settings
+from .session import WebSession
 from .envelope import fail, ok
 
 # devportal ai-meta 端点表(来源: 灵基 app-build 技能 cosmic-meta-api 端点目录)
@@ -75,6 +76,17 @@ def cmd_auth(args) -> None:
         return
 
     env = _resolve_env(args)
+    if args.auth_cmd == "web-add":
+        if not args.user or not args.password:
+            fail("config", "missing", "--user/--password 必填")
+        # 先验证能登录,再落盘(密码只存 ~/.kd/config.json,与 client-secret 同级)
+        s = WebSession(env["url"], env["accountId"], args.user, args.password)
+        s.login()
+        config.save_env(env["name"], {"webUser": args.user, "webPassword": args.password})
+        ok({"name": env["name"], "webUser": args.user, "verified": True,
+            "config": str(config.config_path()),
+            "hint": "convert-rule list/detail 将自动使用该凭证;撤销:重新 web-add 覆盖或手工删字段"})
+        return
     if args.auth_cmd == "show":
         masked = {k: v for k, v in env.items() if k != "_raw"}
         if masked.get("client_secret"):
@@ -248,9 +260,11 @@ def cmd_data(args) -> None:
              f"实体不支持所请求操作;支持: {', '.join(all_ops)}")
     published, failed_list, took = [], [], []
     for op in expanded:
+        qff = tuple(f.strip() for f in (getattr(args, "query_filter_fields", "") or "").split(",") if f.strip())
         api_id, err, urlformat = data.gen_api(env, form, appid, prefix, op, metadata,
                                               status=args.status, took=took,
-                                              query_id_optional=getattr(args, "query_id_optional", False))
+                                              query_id_optional=getattr(args, "query_id_optional", False),
+                                              query_filter_fields=qff)
         if api_id:
             published.append({"operation": op, "number": f"{form}_{op}",
                               "urlformat": urlformat, "apiId": api_id})
@@ -264,56 +278,35 @@ def cmd_data(args) -> None:
 
 
 def cmd_convert_rule(args) -> None:
-    """ly convert-rule — BOTP 转换规则只读通道(工单 #13;契约见 convert.py)。"""
+    """ly convert-rule — BOTP 转换规则只读通道 v2(工单 #13;契约见 convert.py)。"""
     env = _resolve_env(args)
-    if args.cr_cmd == "publish-list":
-        preview = {"env": env["name"], "form": convert.RULE_FORM, "operations": ["query(瘦列表)"],
-                   "status": args.status, "endpoint": data.GEN_V2_API_PATH,
-                   "note": "upsert by urlformat;响应列=头部标量(不含单据体),请求过滤全可选"}
-        write_gate(env, "POST", data.GEN_V2_API_PATH, preview,
-                   confirm=args.confirm, dry_run=args.dry_run)
-        if args.dry_run:
-            return
-        took: list = []
-        try:
-            api_id, err, urlformat = convert.publish_list_contract(env, status=args.status, took=took)
-        except Exception as e:  # noqa: BLE001 — 呈现为结构化错误信封
-            fail("metadata", "contract_failed", str(e)[:300],
-                 "先跑 `ly meta query-forms --params '{\"keyword\":\"convertrule\"}'` 确认实体仍在")
-        if api_id:
-            ok({"published": True, "number": f"{convert.RULE_FORM}_query",
-                "urlformat": urlformat, "apiId": api_id},
-               meta={"took_ms": sum(took),
-                     "hint": f"试一试: ly convert-rule list / ly convert-rule get --id <ruleId>"})
-        else:
-            fail("api", "publish_failed", err or "未知错误",
-                 "genV2ApiByMetaData 被拒;核对开放平台在线状态后重试")
-        return
-    # list / get:纯只读查询
+    web_user = getattr(args, "web_user", None)
+    web_password = getattr(args, "web_password", None)
     if args.cr_cmd == "list":
-        body = convert.query(env, rule_id=getattr(args, "id", None),
-                             source=args.source, target=args.target,
-                             name=args.name, fid=args.fid,
-                             page_no=int(args.page_no), page_size=int(args.page_size))
-    else:  # get
-        body = convert.query(env, rule_id=args.id)
-    if not body.get("status"):
-        fail("api", body.get("errorCode"), body.get("message", "query 失败"),
-             "契约未发布或被改动:先 `ly convert-rule publish-list --confirm` 重发瘦列表契约")
-    d = body.get("data") or {}
-    rows = d.get("rows") or []
-    if args.cr_cmd == "get":
-        if not rows:
-            fail("api", "not_found", f"ruleId={args.id} 无匹配规则",
-                 "先 `ly convert-rule list` 看环境中现存的规则 id")
-        ok(rows[0], meta=body.get("meta"))
+        try:
+            r = convert.list_paths(env, source=args.source, target=args.target,
+                                   keyword=args.keyword,
+                                   web_user=web_user, web_password=web_password)
+        except Exception as e:  # noqa: BLE001 — 呈现为结构化错误信封
+            fail("session", "list_failed", str(e)[:300],
+                 "web 凭证缺失/错误:ly auth web-add --user <账号> --password <密码>")
+        ok({"total_in_env": r["total_in_env"], "fetched": r["fetched"],
+            "matched": r["matched"], "paths": r["paths"]},
+           meta={"hint": "fetched≤500 为会话通道首屏上限;ruleId 获取用 detail 子命令或设计器规则树;"
+                         "按 ruleId 读整行: ly convert-rule get --id <ruleId>"})
         return
-    ok({"rows": rows, "totalCount": d.get("totalCount"), "pageNo": d.get("pageNo"),
-        "pageSize": d.get("pageSize"), "lastPage": d.get("lastPage")},
-       meta={**(body.get("meta") or {}),
-             "hint": "ruleId=rows[].id(数字主键,T_BOTP_ConvertRule);"
-                     "下推用: ly data operate --form <源单> --operation push --id <源单id> "
-                     "--params '{\"targetBill\":...,\"ruleId\":...}'"})
+    if args.cr_cmd == "get":
+        body = convert.get_rule(env, args.id)
+        ok(body, meta={"hint": "字段映射/值转换等策略明细: detail 子命令(会话通道)"})
+        return
+    # detail
+    try:
+        raw_pid = convert.first_path_detail(env, web_user=web_user, web_password=web_password)
+    except Exception as e:  # noqa: BLE001
+        fail("session", "detail_failed", str(e)[:300],
+             "web 凭证缺失/错误:ly auth web-add --user <账号> --password <密码>")
+    ok(raw_pid, meta={"hint": "detail 当前固定打开路线列表第一行(网格选中态传输格式待破解,见 issue #13);"
+                             "rules[].rule_id 可直接用于 ly convert-rule get --id"})
 
 
 # ── 写操作门(confirm 模式:非 GET 一律先预览,--confirm 才执行) ─────────────
@@ -431,6 +424,10 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("show", "login", "test", "logout"):
         sp = auth_sub.add_parser(name)
         common(sp)
+    webadd_p = auth_sub.add_parser("web-add", help="存 Web 会话凭证(设计器通道:账号+密码,先验证后落盘)")
+    webadd_p.add_argument("--user", required=True, help="Web 登录账号(手机号/用户名)")
+    webadd_p.add_argument("--password", required=True, help="Web 登录密码")
+    common(webadd_p)
     auth_p.set_defaults(func=cmd_auth)
 
     meta_p = sub.add_parser("meta", help="devportal 元数据查询与写")
@@ -485,6 +482,9 @@ def build_parser() -> argparse.ArgumentParser:
     pub_p.add_argument("--query-id-optional", action="store_true",
                        help="query 契约的 id 改为可选(默认必填):同契约兼得分页列全量能力;"
                             "对已发布 API 重发即整体替换(upsert by urlformat)")
+    pub_p.add_argument("--query-filter-fields", default=None,
+                       help="query 契约追加可选过滤参数(逗号分隔元数据头部字段名,如 number,name,enabled),"
+                            "供 ly data query --params 使用")
     pub_p.add_argument("--confirm", action="store_true",
                        help="write-mode=confirm 时,真执行必须携带")
     pub_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
@@ -518,31 +518,25 @@ def build_parser() -> argparse.ArgumentParser:
     op_p.set_defaults(func=cmd_data)
 
     cr_p = sub.add_parser("convert-rule",
-                          help="单据转换(BOTP)规则只读通道:publish-list/list/get")
+                          help="单据转换(BOTP)规则只读通道:list(路线)/get(按ruleId)/detail(详情)")
     cr_sub = cr_p.add_subparsers(dest="cr_cmd", required=True)
-    crpl_p = cr_sub.add_parser("publish-list",
-                               help="发布/替换 botp_convertrule 瘦列表 query 契约(走写操作门)")
-    crpl_p.add_argument("--status", default="C", choices=["A", "B", "C", "D"],
-                        help="API 状态:A=内测/B=维护/C=发布/D=禁用,默认 C")
-    crpl_p.add_argument("--confirm", action="store_true",
-                        help="write-mode=confirm 时,真执行必须携带")
-    crpl_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
-    common(crpl_p)
-    crpl_p.set_defaults(func=cmd_convert_rule)
-    crls_p = cr_sub.add_parser("list", help="分页列出环境内转换规则(可按源单/目标单/名称过滤)")
-    crls_p.add_argument("--source", help="源单编码过滤,如 ly_test_bill_a1")
-    crls_p.add_argument("--target", help="目标单编码过滤")
-    crls_p.add_argument("--name", help="规则名称精确过滤(fname)")
-    crls_p.add_argument("--fid", help="规则唯一标识精确过滤(fid,字符串)")
-    crls_p.add_argument("--id", help="按数字主键(ruleId)精确过滤")
-    crls_p.add_argument("--page-no", default=1)
-    crls_p.add_argument("--page-size", default=20)
+    crls_p = cr_sub.add_parser("list", help="列环境内转换路线(会话通道;源单/目标单/关键词客户端过滤)")
+    crls_p.add_argument("--source", help="源单编码精确过滤,如 ly_test_bill_a1")
+    crls_p.add_argument("--target", help="目标单编码精确过滤")
+    crls_p.add_argument("--keyword", help="关键词子串过滤(匹配源/目标编码与名称)")
+    crls_p.add_argument("--web-user", default=None, help="临时 web 账号(默认读环境配置 webUser/loginUser)")
+    crls_p.add_argument("--web-password", default=None, help="临时 web 密码(默认读环境配置 webPassword)")
     common(crls_p)
     crls_p.set_defaults(func=cmd_convert_rule)
-    crget_p = cr_sub.add_parser("get", help="按数字主键(ruleId)读单条规则头部配置")
+    crget_p = cr_sub.add_parser("get", help="按数字主键(ruleId)读规则整行(OpenAPI 通道)")
     crget_p.add_argument("--id", required=True, help="ruleId(rows[].id,数字主键)")
     common(crget_p)
     crget_p.set_defaults(func=cmd_convert_rule)
+    crd_p = cr_sub.add_parser("detail", help="会话通道打开规则详情(当前固定第一行),解析规则树/字段值/映射网格")
+    crd_p.add_argument("--web-user", default=None)
+    crd_p.add_argument("--web-password", default=None)
+    common(crd_p)
+    crd_p.set_defaults(func=cmd_convert_rule)
 
     doc_p = sub.add_parser("doctor", help="环境体检:配置→连通→认证")
     common(doc_p)
