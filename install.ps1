@@ -1,13 +1,15 @@
 ﻿# install.ps1 — lingya(ly CLI + ly skill)一键安装(Windows)
 # 用法: powershell -ExecutionPolicy Bypass -File install.ps1
 #   开关: -InstallRoot <dir>  -NoPath  -NoSkills  -NoVerify
-# 效果: ly CLI 装到 ~\.lingya(bin 加入用户 PATH),技能装到 ~\.agents\skills\ly,
-#       并做冒烟验证(-NoVerify 跳过)
+#         -Harness workbuddy,zcode,opencode,pi,agents   (默认全部)
+# 效果: ly CLI 装到 ~\.lingya(bin 加入用户 PATH),SKILL.md 装到各 AI harness
+#       的 skills 目录(默认全部五个),并做冒烟验证(-NoVerify 跳过)
 param(
     [string]$InstallRoot = (Join-Path $env:USERPROFILE ".lingya"),
     [switch]$NoPath,
     [switch]$NoSkills,
-    [switch]$NoVerify
+    [switch]$NoVerify,
+    [string]$Harness = "all"
 )
 $ErrorActionPreference = "Stop"
 $Repo = $PSScriptRoot
@@ -66,14 +68,44 @@ if (-not $NoPath) {
     }
 }
 
-# 4. 技能(~\.agents\skills 是 ZCode/Claude Code/Codex/Cursor 通用标准目录;
-#    ly 的 SKILL.md 渐进加载引用 references/,须整目录拷贝)
+# 4. 技能:实体只装一份,放在通用兼容目录 ~\.agents\skills\ly(agentskills.io 标准,
+#    Codex/Claude Code/opencode 原生读取);WorkBuddy/ZCode/pi 的目录用 NTFS junction
+#    挂到同一份(junction 无需管理员权限)——升级一处、全家生效;junction 失败回退拷贝。
 if (-not $NoSkills) {
-    $skillDst = Join-Path $env:USERPROFILE ".agents\skills\ly"
-    Step "技能 → $skillDst"
-    if (Test-Path $skillDst) { Remove-Item $skillDst -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $skillDst | Out-Null
-    Copy-Item (Join-Path $Repo "skills\ly\*") $skillDst -Recurse -Force
+    $skillSrc = Join-Path $Repo "skills\ly"
+    $canon = Join-Path $env:USERPROFILE ".agents\skills\ly"
+    Step "技能实体 → $canon"
+    if (Test-Path $canon) { Remove-Item $canon -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $canon | Out-Null
+    Copy-Item (Join-Path $skillSrc "*") $canon -Recurse -Force
+
+    $harnessMap = [ordered]@{
+        "workbuddy" = Join-Path $env:USERPROFILE ".workbuddy\skills\ly"
+        "zcode"     = Join-Path $env:USERPROFILE ".zcode\skills\ly"
+        "opencode"  = Join-Path $env:USERPROFILE ".config\opencode\skills\ly"
+        "pi"        = Join-Path $env:USERPROFILE ".pi\agent\skills\ly"
+    }
+    $targets = if ($Harness -eq "all") { $harnessMap.Keys } else {
+        $Harness.Split(",") | ForEach-Object { $_.Trim().ToLower() }
+    }
+    foreach ($h in $targets) {
+        if (-not $harnessMap.Contains($h)) {
+            Write-Host "[install] 未知 harness: $h(可选 workbuddy/zcode/opencode/pi/all)" -ForegroundColor Yellow
+            continue
+        }
+        $dest = $harnessMap[$h]
+        $parent = Split-Path $dest -Parent
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        try {
+            New-Item -ItemType Junction -Path $dest -Target $canon | Out-Null
+            Step "技能 → $dest(junction → $canon)"
+        } catch {
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item (Join-Path $skillSrc "*") $dest -Recurse -Force
+            Step "技能 → $dest(拷贝;junction 创建失败已回退)"
+        }
+    }
 }
 
 # 5. 冒烟验证(ly doctor 依赖 ERP 环境配置与网络,仅在已配置时执行)
@@ -99,4 +131,6 @@ Write-Host '  ly auth add --name local --url http://127.0.0.1:8080/ierp --accoun
 Write-Host '  ly meta query-forms --params "{\"keyword\":\"BAS\"}"'
 Write-Host '  ly data precheck --form <表单编码>   # 业务数据通道四项检查'
 Write-Host ""
-Write-Host "技能已装到 ~\.agents\skills\ly(含 SKILL.md 与 references\),任何 harness 可直接加载"
+Write-Host "技能实体在 ~\.agents\skills\ly(通用兼容,Codex/Claude Code/opencode 直接读取)," -ForegroundColor Green
+Write-Host "WorkBuddy/ZCode/pi 目录已用 junction 挂到同一份——升级重跑本脚本一次即全家生效。" -ForegroundColor Green
+Write-Host "只想装部分 harness: -Harness zcode,pi"

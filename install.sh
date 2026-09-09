@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # install.sh — lingya(ly CLI + ly skill)一键安装(Linux/macOS/WSL)
 # 用法: bash install.sh [--root DIR] [--no-path] [--no-skills] [--no-verify]
-# 效果: ly CLI 装到 ~/.lingya(bin 加入 shell rc),技能装到 ~/.agents/skills/ly,
-#       并做冒烟验证(--no-verify 跳过)
+#                    [--harness workbuddy,zcode,opencode,pi,agents]
+# 效果: ly CLI 装到 ~/.lingya(bin 加入 shell rc),SKILL.md 装到各 AI harness 的
+#       skills 目录(默认全部五个),并做冒烟验证(--no-verify 跳过)
 set -e
 ROOT="${HOME}/.lingya"
-NO_PATH=0; NO_SKILLS=0; NO_VERIFY=0
+NO_PATH=0; NO_SKILLS=0; NO_VERIFY=0; HARNESS="all"
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT="$2"; shift 2;;
     --no-path) NO_PATH=1; shift;;
     --no-skills) NO_SKILLS=1; shift;;
     --no-verify) NO_VERIFY=1; shift;;
+    --harness) HARNESS="$2"; shift 2;;
     *) echo "未知参数: $1"; exit 2;;
   esac
 done
@@ -68,14 +70,47 @@ if [ "$NO_PATH" -eq 0 ]; then
   esac
 fi
 
-# 技能(~/.agents/skills 是 ZCode/Claude Code/Codex/Cursor 通用标准目录;
-# ly 的 SKILL.md 渐进加载引用 references/,须整目录拷贝)
+# 技能:实体只装一份,放在通用兼容目录 ~/.agents/skills/ly(agentskills.io 标准,
+# Codex/Claude Code/opencode 原生读取);WorkBuddy/ZCode/pi 的目录用符号链接挂到
+# 同一份——升级一处、全家生效。链接失败(权限受限/MSYS 降级)自动回退为拷贝。
+SKILL_SRC="$REPO/skills/ly"
+CANON="$HOME/.agents/skills/ly"
+install_canonical() {
+  rm -rf "$CANON"
+  mkdir -p "$CANON"
+  cp -r "$SKILL_SRC/." "$CANON/"
+  echo "[install] 技能实体 → $CANON"
+}
+link_or_copy() {  # $1=harness 名 $2=该 harness 的用户级技能目录
+  local dest="$2"
+  rm -rf "$dest"
+  mkdir -p "$(dirname "$dest")"
+  # MSYS/GitBash 的 ln -s 可能静默降级为拷贝:成功且可读才算链接成功
+  if ln -s "$CANON" "$dest" 2>/dev/null && [ -e "$dest/SKILL.md" ] && [ -L "$dest" ]; then
+    echo "[install] $1 → $dest(链接 → $CANON)"
+  else
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    cp -r "$SKILL_SRC/." "$dest/"
+    echo "[install] $1 → $dest(拷贝;链接创建失败已回退)"
+  fi
+}
 if [ "$NO_SKILLS" -eq 0 ]; then
-  DEST="$HOME/.agents/skills/ly"
-  echo "[install] 技能 → $DEST"
-  rm -rf "$DEST"
-  mkdir -p "$DEST"
-  cp -r "$REPO/skills/ly/." "$DEST/"
+  install_canonical
+  case "$HARNESS" in
+    all) TARGETS="workbuddy zcode opencode pi";;   # agents 即实体本体
+    *) TARGETS="$(echo "$HARNESS" | tr ',' ' ' | tr 'A-Z' 'a-z')";;
+  esac
+  for h in $TARGETS; do
+    case "$h" in
+      workbuddy) link_or_copy workbuddy "$HOME/.workbuddy/skills/ly";;
+      zcode)     link_or_copy zcode     "$HOME/.zcode/skills/ly";;
+      opencode)  link_or_copy opencode  "$HOME/.config/opencode/skills/ly";;
+      pi)        link_or_copy pi        "$HOME/.pi/agent/skills/ly";;
+      agents)    echo "[install] agents 即实体本体($CANON),无需挂载";;
+      *) echo "[install] 未知 harness: $h(可选 workbuddy/zcode/opencode/pi/agents/all)";;
+    esac
+  done
 fi
 
 # 冒烟验证(ly doctor 依赖 ERP 环境配置与网络,仅在已配置时提示)
@@ -97,4 +132,6 @@ echo "  ly auth add --name local --url http://127.0.0.1:8080/ierp --account-id <
 echo "  ly meta query-forms --params '{\"keyword\":\"BAS\"}'"
 echo "  ly data precheck --form <表单编码>   # 业务数据通道四项检查"
 echo ""
-echo "技能已装到 ~/.agents/skills/ly(含 SKILL.md 与 references/),任何 harness 可直接加载"
+echo "技能实体在 ~/.agents/skills/ly(通用兼容,Codex/Claude Code/opencode 直接读取),"
+echo "WorkBuddy/ZCode/pi 目录已用符号链接挂到同一份——升级重跑本脚本一次即全家生效。"
+echo "只想装部分 harness: bash install.sh --harness zcode,pi"

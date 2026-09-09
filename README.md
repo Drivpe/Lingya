@@ -44,16 +44,40 @@
 
 ## 安装
 
-### ① 常规(推荐)
+### 一键安装(推荐:ly CLI + 多 harness 技能,一次到位)
 
-```bash
-pip install -e .
-ly --version
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Drivpe/Lingya/main/install.ps1 | iex
 ```
 
-要求 Python ≥ 3.10,零第三方依赖。
+macOS / Linux / WSL (bash):
 
-### ② 开发者
+```bash
+curl -fsSL https://raw.githubusercontent.com/Drivpe/Lingya/main/install.sh | bash
+```
+
+(或克隆仓库后执行 `powershell -File install.ps1` / `bash install.sh`;`-InstallRoot/--root` 自定义目录,`--no-verify` 跳过冒烟)
+
+脚本做三件事:
+
+1. **ly CLI** 装到 `~/.lingya`(bin 加入 PATH);纯 Python 标准库,零第三方依赖。
+2. **技能实体**装一份到通用兼容目录 `~/.agents/skills/ly`(agentskills.io 标准——Codex / Claude Code / opencode 原生读取)。
+3. **其余 harness 用链接挂到同一份实体**(Windows 用 NTFS junction 无需管理员,Unix 用符号链接;失败自动回退拷贝)——升级时重跑一次安装脚本,所有 harness 同时生效:
+
+| Harness | 用户级 skills 目录 | 接入方式 |
+|---|---|---|
+| WorkBuddy | `~/.workbuddy/skills/ly` | 链接挂载 |
+| ZCode | `~/.zcode/skills/ly` | 链接挂载(官方约定的用户级技能目录) |
+| opencode | `~/.config/opencode/skills/ly` | 链接挂载(opencode 另原生读 `~/.agents/skills`) |
+| pi | `~/.pi/agent/skills/ly` | 链接挂载 |
+| Codex / Claude Code 等 | `~/.agents/skills/ly` | **实体本体**,直接读取 |
+
+- 只想接部分 harness:`bash install.sh --harness zcode,pi`(PowerShell:`-Harness zcode,pi`);`--no-skills` 跳过技能安装。
+- 装完各 harness **重开会话**即可加载技能(WorkBuddy 用户级技能同样生效)。
+
+### 开发者
 
 ```bash
 git clone https://github.com/Drivpe/Lingya.git && cd Lingya
@@ -61,15 +85,15 @@ pip install -e .
 ly doctor   # 装完先体检
 ```
 
-### ③ AI Agent 接入(三行)
+### AI Agent 接入(三行)
 
 ```text
 1. 读 skills/ly/SKILL.md —— 命令契约与铁律(先判 ok 再取 data;非 GET 需 --confirm)
-2. ly auth add 配好环境后跑 ly doctor 确认三绿灯
+2. ly auth add 配好环境后跑 ly doctor 确认绿灯
 3. 需要端点细节时再读 skills/ly/references/endpoints.md(端点全表+踩坑实证),不要猜
 ```
 
-宿主落位:灵基 build 复制到 `C:\Users\<user>\.lingeebuild\config\builtin-skills\ly`;ZCode / Claude Code 放入对应 skills 目录;opencode 直接在指令里让它读 SKILL.md。
+技能目录结构遵循 Agent Skills 标准(agentskills.io):`SKILL.md` + `references/`(按需渐进加载),因此同一份技能可被任意实现该标准的 harness 加载;不在上表内的 harness,把 `skills/ly/` 整目录复制进它的 skills 路径、或直接让 Agent 读 `SKILL.md` 即可。
 
 ## 快速开始
 
