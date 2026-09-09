@@ -93,6 +93,32 @@ def get_rule(env: dict, rule_id: str) -> dict:
     return rows[0]
 
 
+# ── enable/disable:规则启停(OpenAPI 通道,2026-09-09 实测闭环) ────────────────
+def set_rule_enabled(env: dict, rule_id: str, enable: bool) -> dict:
+    """启用/停用转换规则。前提:ly data publish --form botp_crlist
+    --operations enable,disable --confirm(先发布一次)。
+
+    实测语义:对已停用规则再 disable 报 603「数据已为停用状态」(状态前置校验,
+    非幂等);启用成功后 query 读回 enabled=1。写入走 T_BOTP_ConvertRule 物理表,
+    不受设计器「其他开发商发布」锁定影响(锁定只作用于设计器 UI 的字段回写)。
+    """
+    op = "enable" if enable else "disable"
+    body = ly_api.call(env, "POST", f"/kapi/v2/open/{RULE_FORM}/{op}",
+                       payload={"data": {"id": str(rule_id)}})
+    if not body.get("status"):
+        from .envelope import fail
+        fail("api", body.get("errorCode"),
+             body.get("message", f"{op} 失败"),
+             "先发布:ly data publish --form botp_crlist --operations enable,disable --confirm;"
+             "状态前置不满足(如重复同向操作)会报错")
+    d = body.get("data") or {}
+    result = d.get("result") or []
+    errs = [e for r in result for e in (r.get("errors") or [])]
+    return {"operation": op, "id": str(rule_id),
+            "successCount": d.get("successCount"), "totalCount": d.get("totalCount"),
+            "failCount": d.get("failCount"), "result": result, "errors": errs}
+
+
 # ── detail:规则详情解析(会话通道) ──────────────────────────────────────────
 _LOAD_DATA = [{"key": "", "methodName": "loadData", "args": [], "postData": []}]
 _MODIFY_POST = [{"treeviewap": {"focus": {"id": "0", "parentid": "", "text": "业务云",

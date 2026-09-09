@@ -337,3 +337,46 @@ GET form/getConfig.do?params={"formId":"botp_convertrule","flag":"<rand16>","f":
 - `ly convert-rule list --search <kw>`:服务端过滤全量路线(1426 内 indexOf)。
 - `ly convert-rule detail --source <src> --target <tgt>`:直开指定规则详情(规则树含 ruleId)。
 - 回归:`ly convert-rule detail`(无参)仍开第一行,解析正常。
+
+---
+
+## 11. C3 保存通道活体破解(第三轮,2026-09-09)
+
+### 11.1 保存动作契约(✅ 已破解)
+
+规则详情页 `botp_convertrule` 的「保存全部」按钮 `btnsave` 是**纯插件按钮**(无绑定实体操作):
+
+```json
+[{"key": "tbar_main", "methodName": "itemClick", "args": ["btnsave", ""],
+  "postData": [{}, [{"k": "<字段key>", "v": <新值>}, ...], []]}]
+```
+
+- `args` 第二元素**必须存在**:`["btnsave"]`(缺参会「功能异常」)、`["btnsave","save"]`(报「实体botp_convertrule上没有编码为save的操作」)都不行——**空串**让框架跳过实体操作分发、直接进插件 `ConvertRuleEdit.itemClick` → `doModify()` → `doSaveAll()`。
+- `postData[0]`=控件状态回显(空对象可)、`postData[1]`=**字段回写列表**、`postData[2]` 留空。字段条目格式 `{"k":字段key,"v":值}`(可选 `"r"` 行号)——出自 `FormController.postData/postFieldState` 字节码:`k`→字段、`r`→行、`v`→经 `FieldEdit.postBack` 写模型。
+- 无改动保存返回 `ShowNotificationMsg "保存成功。"` + 规则树 updateNodes。
+
+### 11.2 字段锁:kingdee 发布的规则被设计器锁定(⚠️ 内容写入的边界)
+
+- 写入值能到达字段,但 `FieldEdit.checkEditFieldStatus` 拒绝:`无法修改锁定字段<名>的值`(实测 `fmulilangname`、`fsourcelayout` 均锁)。与 `Status=EDIT/ADDNEW` 参数无关——锁来自页面下发的 **`st` 字段状态**(`u` 动作携带,如 `{"st":[["er_hotelbill",...]],"k":"fsourcelayout"}`),浏览器把它存在 pageCache 的 `controlMetaState` 并在后续请求回显。
+- 下发流里的锁提示原文:**「本规则由其他开发商发布,请勿直接改动;可以扩展一个新分支后修改」**——即设计器对**非本开发商发布的原始规则**按设计锁定全部字段。
+- kd 知识库证实(《单据的转换规则继承和扩展的区别》 vip.kingdee.com/knowledge/836044166890504704):
+  - **扩展** = 在原规则基础上修改,扩展规则是原规则的补充(设计器对 kingdee 规则改内容的正规路径 =「扩展一个新分支」);
+  - **继承** = 派生全新独立规则(受原规则控制)。
+- → C3 内容写入路径:**本开发商(或新建)的规则可直接编辑;kingdee 原始规则先经设计器「扩展」生成新分支**。新建规则疑走同表单 `Status=ADDNEW`(待验证)。
+
+### 11.3 规则启停走 OpenAPI(✅ 已落地,绕过设计器锁)
+
+`botp_crlist`(基础资料实体)的开放操作含 **enable/disable**——发布后直接 HTTP 调用,**不受设计器 isv 锁影响**:
+
+```
+ly data publish --form botp_crlist --operations enable,disable --confirm
+ly convert-rule enable --id <ruleId> --confirm    # → enabled=1(读回断言通过)
+ly convert-rule disable --id <ruleId> --confirm   # 非幂等:重复同向报 603「数据已为停用状态」
+```
+
+实测闭环:enable→query 读回 enabled=1→disable→读回 enabled=0,状态已复原。
+
+### 11.4 C4 现状:isv 权限墙(与 BOM 案例同源)
+
+- `er_hotelbill`(em 应用,kingdee)无 push 操作;`ai-meta addOperation` 挂 push 报「表单不属于当前开发商,请扩展后再进行编辑」(对 `er_hotelbill_ext` 同样被拒——扩展表单属主仍是 kingdee)。`OperationApi`/`DefaultOperate` 字节码证实 v2 open 运行时是**通用实体操作执行器**,没有内置 push——实体上必须先有 push 操作。
+- 解锁选项:① 管理员侧给开发商 e8n4 放开 em 资源权限或手工建扩展应用(同 BOM 案例);② 走会话通道(admin 会话)在设计器加 push 操作(载荷待逆向);③ C3 完整落地后,在**自属应用**的单据间建规则+挂 push,端到端验收同样成立(spec 的「标准单→标准单」本就非硬性)。

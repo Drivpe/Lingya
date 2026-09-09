@@ -304,6 +304,18 @@ def cmd_convert_rule(args) -> None:
         body = convert.get_rule(env, args.id)
         ok(body, meta={"hint": "字段映射/值转换等策略明细: detail 子命令(会话通道)"})
         return
+    if args.cr_cmd in ("enable", "disable"):
+        write_gate(env, "POST", f"/kapi/v2/open/botp_crlist/{args.cr_cmd}",
+                   {"data": {"id": str(args.id)}}, confirm=args.confirm,
+                   dry_run=args.dry_run)
+        try:
+            r = convert.set_rule_enabled(env, args.id, enable=args.cr_cmd == "enable")
+        except Exception as e:  # noqa: BLE001
+            fail("api", "operate_failed", str(e)[:300],
+                 "先发布:ly data publish --form botp_crlist --operations enable,disable --confirm")
+        ok(r, meta={"hint": "读回断言:ly convert-rule get --id <ruleId> 看 enabled 字段;"
+                            "重复同向操作会报状态前置错误(非幂等)"})
+        return
     # detail
     src, tgt = getattr(args, "source", None), getattr(args, "target", None)
     try:
@@ -547,6 +559,14 @@ def build_parser() -> argparse.ArgumentParser:
     crget_p.add_argument("--id", required=True, help="ruleId(rows[].id,数字主键)")
     common(crget_p)
     crget_p.set_defaults(func=cmd_convert_rule)
+    for op_name, op_help in (("enable", "启用转换规则(OpenAPI enable,走写操作门)"),
+                             ("disable", "停用转换规则(OpenAPI disable,走写操作门)")):
+        crop_p = cr_sub.add_parser(op_name, help=op_help)
+        crop_p.add_argument("--id", required=True, help="ruleId")
+        crop_p.add_argument("--confirm", action="store_true")
+        crop_p.add_argument("--dry-run", action="store_true", help="只打印请求预览,不执行")
+        common(crop_p)
+        crop_p.set_defaults(func=cmd_convert_rule)
     crd_p = cr_sub.add_parser("detail", help="会话通道打开规则详情(--source/--target 直开指定规则;否则第一行),解析规则树/字段值/映射网格")
     crd_p.add_argument("--source", help="源单编码,如 pur_order(与 --target 成对)")
     crd_p.add_argument("--target", help="目标单编码,如 pur_instock(与 --source 成对)")
