@@ -124,7 +124,7 @@ ly api GET /kapi/v2/devportal/ai-meta/getDevInfo   # 任意端点兜底
 - [x] v0.1 auth(getToken/verify/withdraw)+ meta 只读查询 + api 透传 + doctor
 - [x] v0.1.1 写操作门(write-mode confirm/free)+ ly config 命令
 - [x] v0.2.0 元数据二开写通道(build-meta / modify-meta)+ 操作与校验全生命周期(经 api 透传 devportal ai-meta)
-- [ ] v0.3 业务数据通道(`ly data` 命令;业务 API 为「对象×操作」发布式路由,见 issue #2 调研)
+- [x] v0.3 业务数据通道(`ly data`:precheck/publish 自动发布业务 API「对象×操作」路由,save/query/operate 生命周期,见 issue #2 调研)
 - [ ] v0.4 星空适配(K3 Cloud 是分支逻辑:LoginBySign 签名会话;旗舰版则近零适配;见 issue #7 调研)
 - [ ] v0.5 扩展表单全流程包装(extendForm / enableDisable / 插件注册)
 

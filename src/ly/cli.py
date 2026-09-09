@@ -121,6 +121,15 @@ def cmd_meta(args) -> None:
         write_gate(env, "POST", path, payload, confirm=args.confirm, dry_run=args.dry_run)
         t0 = time.time()
         body = api.call(env, "POST", path, payload=payload)
+        if args.meta_cmd == "build-meta":
+            # SKILL 承诺:entityResults[].success 逐实体判定——部分失败不得回 ok:true
+            er = (body.get("data") or {}).get("entityResults") or []
+            failed = [e for e in er if e.get("success") is False]
+            if er and failed:
+                first_msg = (failed[0].get("message") or "")[:120]
+                fail("api", "entity_partial_failed",
+                     f"{len(failed)}/{len(er)} 个实体建模失败: {first_msg}",
+                     "按 data.entityResults[].message 逐条补齐后重发(幂等:已成功实体重发报已存在)")
         _unwrap(body, took_ms=int((time.time() - t0) * 1000))
         return
     if args.meta_cmd not in META_ENDPOINTS:
@@ -133,6 +142,13 @@ def cmd_meta(args) -> None:
 
 
 # ── data(业务数据通道前置:precheck/publish) ─────────────────────────────────
+
+def _require_api_ok(body: dict, fallback: str, hint: str | None = None) -> dict:
+    """苍穹统一响应 {status,errorCode,message} 校验:失败即 fail 信封。"""
+    if not body.get("status"):
+        fail("api", body.get("errorCode"), body.get("message", fallback), hint)
+    return body
+
 
 def cmd_data(args) -> None:
     env = _resolve_env(args)
@@ -150,9 +166,8 @@ def cmd_data(args) -> None:
         write_gate(env, "POST", path, wrapped, confirm=args.confirm, dry_run=args.dry_run)
         t0 = time.time()
         body = api.call(env, "POST", path, payload=wrapped)
-        if not body.get("status"):
-            fail("api", body.get("errorCode"), body.get("message", "save 失败"),
-                 "候选键语义:传 id=更新,不传=新增;字段名须与实体属性一致")
+        _require_api_ok(body, "save 失败",
+                        "候选键语义:传 id=更新,不传=新增;字段名须与实体属性一致")
         d = body.get("data") or {}
         result = d.get("result") or []
         bill_id = result[0].get("id") if result and result[0].get("billStatus") else None
@@ -160,7 +175,7 @@ def cmd_data(args) -> None:
             "successCount": d.get("successCount"), "failCount": d.get("failCount")},
            meta={"took_ms": int((time.time() - t0) * 1000),
                  "hint": f"读回: ly data query --form {form} --id {bill_id}" if bill_id else None})
-    if args.data_cmd == "query":
+    elif args.data_cmd == "query":
         params = {"pageNo": str(args.page_no), "pageSize": str(args.page_size)}
         if args.id:
             params["id"] = str(args.id)
@@ -169,13 +184,12 @@ def cmd_data(args) -> None:
         path = f"/kapi/v2/open/{form}/query"
         t0 = time.time()
         body = api.call(env, "GET", f"{path}?{urllib.parse.urlencode(params)}")
-        if not body.get("status"):
-            fail("api", body.get("errorCode"), body.get("message", "query 失败"),
-                 "query 发布契约必带 id+分页;字段集由发布时的返回参数定义固化")
+        _require_api_ok(body, "query 失败",
+                        "query 发布契约必带 id+分页;字段集由发布时的返回参数定义固化")
         ok(body.get("data"), meta={"took_ms": int((time.time() - t0) * 1000)})
 
     # operate:已发布操作 API 的生命周期操作(submit/audit/unaudit/unsubmit/delete/push...)
-    if args.data_cmd == "operate":
+    elif args.data_cmd == "operate":
         params = {"id": str(args.id)}
         if args.params:
             params.update(json.loads(args.params))
@@ -184,9 +198,8 @@ def cmd_data(args) -> None:
         write_gate(env, "POST", path, wrapped, confirm=args.confirm, dry_run=args.dry_run)
         t0 = time.time()
         body = api.call(env, "POST", path, payload=wrapped)
-        if not body.get("status"):
-            fail("api", body.get("errorCode"), body.get("message", f"{args.operation} 失败"),
-                 "状态迁移前置不满足或 id 不存在;操作 API 宽松语义:重复同向操作可能幂等成功")
+        _require_api_ok(body, f"{args.operation} 失败",
+                        "状态迁移前置不满足或 id 不存在;操作 API 宽松语义:重复同向操作可能幂等成功")
         d = body.get("data") or {}
         result = d.get("result") or []
         errs = [e for r in result for e in (r.get("errors") or [])]
@@ -218,10 +231,13 @@ def cmd_data(args) -> None:
         try:
             ops = data.call_entity_operations(env, form)
             operations = ops
-            detail = f"支持操作: {', '.join(ops)}" if ops else "getEntityOperations 返回空"
-            checks.append({"check": "openapi_online", "ok": bool(ops), "detail": detail})
+            checks.append({"check": "openapi_online", "ok": True, "detail": "开放平台在线"})
+            checks.append({"check": "operations", "ok": bool(ops),
+                           "detail": f"支持操作: {', '.join(ops)}" if ops
+                                     else "getEntityOperations 返回空(在线但无操作)"})
         except Exception as e:  # noqa: BLE001
             checks.append({"check": "openapi_online", "ok": False, "detail": str(e)[:200]})
+            checks.append({"check": "operations", "ok": False, "detail": "开放平台不可达,操作可查性未知"})
             hints.append("开放平台服务不可达/未初始化:先在【开放服务云 → OpenAPI → 初始化】执行初始化,再重试")
         failed = [c for c in checks if not c["ok"]]
         ok({"checks": checks, "metadata": meta_info, "operations": operations,
